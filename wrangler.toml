@@ -1,0 +1,97 @@
+# Wihda Backend - Cloudflare Workers Configuration
+# API versioned at /v1/*
+
+name = "wihda-backend"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Account ID - replace with your Cloudflare account ID
+# account_id = "your-account-id"
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "wihda-db"
+database_id = "placeholder-db-id" # Replace with actual D1 database ID
+
+# R2 Storage binding for images
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "wihda-uploads"
+
+# KV Namespace for rate limiting and caching
+[[kv_namespaces]]
+binding = "KV"
+id = "placeholder-kv-id" # Replace with actual KV namespace ID
+
+# Queue for matching jobs
+[[queues.producers]]
+queue = "wihda-matching-queue"
+binding = "MATCHING_QUEUE"
+
+# Queue for campaign ingestion
+[[queues.producers]]
+queue = "wihda-campaign-queue"
+binding = "CAMPAIGN_QUEUE"
+
+# Queue for notifications
+[[queues.producers]]
+queue = "wihda-notification-queue"
+binding = "NOTIFICATION_QUEUE"
+
+# Queue consumers
+[[queues.consumers]]
+queue = "wihda-matching-queue"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 3
+
+[[queues.consumers]]
+queue = "wihda-campaign-queue"
+max_batch_size = 10
+max_batch_timeout = 60
+max_retries = 3
+
+[[queues.consumers]]
+queue = "wihda-notification-queue"
+max_batch_size = 50
+max_batch_timeout = 10
+max_retries = 5
+
+# Durable Objects for Chat
+[[durable_objects.bindings]]
+name = "CHAT_DO"
+class_name = "ChatThreadDurableObject"
+
+# Durable Objects migrations
+[[migrations]]
+tag = "v1"
+new_classes = ["ChatThreadDurableObject"]
+
+# Cron triggers for scheduled jobs
+[triggers]
+crons = ["0 */12 * * *"]  # Every 12 hours for campaign ingestion
+
+# Environment variables (use wrangler secret for sensitive values)
+[vars]
+ENVIRONMENT = "development"
+JWT_SECRET = "dev-jwt-secret-change-in-production"
+FCM_SERVER_KEY = ""
+
+# Production overrides
+[env.production]
+name = "wihda-backend-prod"
+[env.production.vars]
+ENVIRONMENT = "production"
+
+# Staging environment
+[env.staging]
+name = "wihda-backend-staging"
+[env.staging.vars]
+ENVIRONMENT = "staging"

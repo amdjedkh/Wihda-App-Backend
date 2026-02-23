@@ -10,21 +10,21 @@
 export interface Env {
   // D1 Database
   DB: D1Database;
-  
+
   // R2 Storage
   STORAGE: R2Bucket;
-  
+
   // KV Namespace
   KV: KVNamespace;
-  
+
   // Queues
   MATCHING_QUEUE: Queue<MatchingQueueMessage>;
   CAMPAIGN_QUEUE: Queue<CampaignQueueMessage>;
   NOTIFICATION_QUEUE: Queue<NotificationQueueMessage>;
-  
+
   // Durable Objects
   CHAT_DO: DurableObjectNamespace;
-  
+
   // Environment variables
   ENVIRONMENT: string;
   JWT_SECRET: string;
@@ -35,8 +35,8 @@ export interface Env {
 // User Types
 // ============================================
 
-export type UserRole = 'user' | 'moderator' | 'admin';
-export type UserStatus = 'active' | 'banned' | 'suspended';
+export type UserRole = "user" | "moderator" | "admin";
+export type UserStatus = "active" | "banned" | "suspended";
 
 export interface User {
   id: string;
@@ -95,17 +95,17 @@ export interface UserNeighborhood {
 // Coins Types
 // ============================================
 
-export type CoinSourceType = 
-  | 'leftovers_match_closed_giver'
-  | 'leftovers_match_closed_receiver'
-  | 'cleanify_approved'
-  | 'admin_adjustment'
-  | 'signup_bonus'
-  | 'referral_bonus';
+export type CoinSourceType =
+  | "leftovers_match_closed_giver"
+  | "leftovers_match_closed_receiver"
+  | "cleanify_approved"
+  | "admin_adjustment"
+  | "signup_bonus"
+  | "referral_bonus";
 
-export type CoinStatus = 'valid' | 'void';
+export type CoinStatus = "valid" | "void";
 
-export type CoinCategory = 'leftovers' | 'cleanify' | 'admin' | 'bonus';
+export type CoinCategory = "leftovers" | "cleanify" | "admin" | "bonus";
 
 export interface CoinLedgerEntry {
   id: string;
@@ -144,9 +144,15 @@ export interface CoinBalance {
 // Leftovers Types
 // ============================================
 
-export type OfferStatus = 'draft' | 'active' | 'matched' | 'closed' | 'cancelled' | 'expired';
-export type NeedStatus = 'active' | 'matched' | 'closed' | 'cancelled';
-export type Urgency = 'low' | 'normal' | 'high' | 'urgent';
+export type OfferStatus =
+  | "draft"
+  | "active"
+  | "matched"
+  | "closed"
+  | "cancelled"
+  | "expired";
+export type NeedStatus = "active" | "matched" | "closed" | "cancelled";
+export type Urgency = "low" | "normal" | "high" | "urgent";
 
 export interface LeftoverSurvey {
   schema_version: number;
@@ -191,8 +197,13 @@ export interface LeftoverNeed {
 // Match Types
 // ============================================
 
-export type MatchStatus = 'active' | 'pending_closure' | 'closed' | 'cancelled' | 'disputed';
-export type ClosureType = 'successful' | 'cancelled' | 'expired' | 'disputed';
+export type MatchStatus =
+  | "active"
+  | "pending_closure"
+  | "closed"
+  | "cancelled"
+  | "disputed";
+export type ClosureType = "successful" | "cancelled" | "expired" | "disputed";
 
 export interface Match {
   id: string;
@@ -225,8 +236,8 @@ export interface MatchWithDetails extends Match {
 // Chat Types
 // ============================================
 
-export type ChatThreadStatus = 'active' | 'closed' | 'archived';
-export type MessageType = 'text' | 'image' | 'system' | 'location';
+export type ChatThreadStatus = "active" | "closed" | "archived";
+export type MessageType = "text" | "image" | "system" | "location";
 
 export interface ChatThread {
   id: string;
@@ -261,23 +272,50 @@ export interface ChatMessageWithSender extends ChatMessage {
 // Cleanify Types
 // ============================================
 
-export type CleanifyStatus = 'pending' | 'approved' | 'rejected';
+export interface CleanifySubmissionWithUser extends CleanifySubmission {
+  user_name: string;
+}
+
+export type CleanifyStatus =
+  | "draft_before" // Created; waiting for before photo upload
+  | "in_progress" // Before photo confirmed; waiting for after photo (≥20 min gate)
+  | "pending_review" // After photo confirmed; awaiting moderator review
+  | "approved"
+  | "rejected"
+  | "expired"; // 48-hour completion window elapsed
 
 export interface CleanifySubmission {
   id: string;
   user_id: string;
   neighborhood_id: string;
-  before_photo_url: string;
-  after_photo_url: string;
+
+  // before photo
+  before_photo_url: string | null;
+  before_photo_key: string | null;
+  before_uploaded_at: string | null;
+  started_at: string | null;
+
+  // after photo
+  after_photo_url: string | null;
+  after_photo_key: string | null;
+  after_uploaded_at: string | null;
+  completed_at: string | null;
+
+  // Optional metadata
   geo_lat: number | null;
   geo_lng: number | null;
   description: string | null;
+
+  // Lifecycle
   status: CleanifyStatus;
-  submitted_at: string;
+
+  // Moderation
   reviewer_id: string | null;
   reviewed_at: string | null;
   review_note: string | null;
   coins_awarded: number;
+
+  // Audit
   created_at: string;
   updated_at: string;
 }
@@ -286,12 +324,27 @@ export interface CleanifySubmissionWithUser extends CleanifySubmission {
   user_name: string;
 }
 
+// DTOs
+export interface StartCleanifyRequest {
+  geo_lat?: number;
+  geo_lng?: number;
+  description?: string;
+}
+
+export interface ConfirmPhotoRequest {
+  file_key: string;
+}
+
+export interface ReviewCleanifyRequest {
+  note?: string; // Required on reject, optional on approve
+}
+
 // ============================================
 // Campaign Types
 // ============================================
 
-export type CampaignSource = 'scrape' | 'manual' | 'api';
-export type CampaignStatus = 'active' | 'expired' | 'cancelled';
+export type CampaignSource = "scrape" | "manual" | "api";
+export type CampaignStatus = "active" | "expired" | "cancelled";
 
 export interface Campaign {
   id: string;
@@ -319,15 +372,15 @@ export interface Campaign {
 // Notification Types
 // ============================================
 
-export type NotificationType = 
-  | 'match_created'
-  | 'new_message'
-  | 'match_closed'
-  | 'coins_awarded'
-  | 'cleanify_approved'
-  | 'cleanify_rejected'
-  | 'campaign_new'
-  | 'system';
+export type NotificationType =
+  | "match_created"
+  | "new_message"
+  | "match_closed"
+  | "coins_awarded"
+  | "cleanify_approved"
+  | "cleanify_rejected"
+  | "campaign_new"
+  | "system";
 
 export interface Notification {
   id: string;
@@ -345,14 +398,14 @@ export interface Notification {
 // Moderation Types
 // ============================================
 
-export type ModerationActionType = 
-  | 'cleanify_approve'
-  | 'cleanify_reject'
-  | 'match_void'
-  | 'coin_void'
-  | 'user_ban'
-  | 'user_unban'
-  | 'content_remove';
+export type ModerationActionType =
+  | "cleanify_approve"
+  | "cleanify_reject"
+  | "match_void"
+  | "coin_void"
+  | "user_ban"
+  | "user_unban"
+  | "content_remove";
 
 export interface ModerationLog {
   id: string;
@@ -370,7 +423,7 @@ export interface ModerationLog {
 // ============================================
 
 export interface MatchingQueueMessage {
-  type: 'match_offer' | 'match_need' | 'scheduled_matching';
+  type: "match_offer" | "match_need" | "scheduled_matching";
   offer_id?: string;
   need_id?: string;
   neighborhood_id?: string;
@@ -378,7 +431,7 @@ export interface MatchingQueueMessage {
 }
 
 export interface CampaignQueueMessage {
-  type: 'ingest' | 'expire_old';
+  type: "ingest" | "expire_old";
   source?: string;
   neighborhood_id?: string;
   timestamp: string;
@@ -415,7 +468,7 @@ export interface PaginatedResponse<T> {
 }
 
 export interface JWTPayload {
-  sub: string;  // user_id
+  sub: string; // user_id
   role: UserRole;
   neighborhood_id: string | null;
   iat: number;
@@ -511,7 +564,7 @@ export interface ReviewCleanifyRequest {
 
 // Image Upload
 export interface UploadUrlRequest {
-  content_type: 'before_photo' | 'after_photo' | 'chat_image';
+  content_type: "before_photo" | "after_photo" | "chat_image";
   file_extension: string;
 }
 

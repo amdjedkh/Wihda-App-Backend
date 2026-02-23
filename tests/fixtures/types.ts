@@ -8,8 +8,8 @@ export interface User {
   phone?: string;
   password_hash: string;
   display_name: string;
-  role: 'user' | 'moderator' | 'admin';
-  status: 'active' | 'suspended' | 'banned' | 'deleted';
+  role: "user" | "moderator" | "admin";
+  status: "active" | "suspended" | "banned" | "deleted";
   language_preference?: string;
   fcm_token?: string;
   created_at: string;
@@ -47,7 +47,7 @@ export interface LeftoverOffer {
   quantity: number;
   pickup_window_start?: string;
   pickup_window_end?: string;
-  status: 'draft' | 'active' | 'matched' | 'closed' | 'cancelled' | 'expired';
+  status: "draft" | "active" | "matched" | "closed" | "cancelled" | "expired";
   expiry_at: string;
   created_at: string;
   updated_at: string;
@@ -58,8 +58,8 @@ export interface LeftoverNeed {
   user_id: string;
   neighborhood_id: string;
   survey_json: string;
-  urgency: 'low' | 'normal' | 'high' | 'urgent';
-  status: 'active' | 'matched' | 'closed' | 'cancelled';
+  urgency: "low" | "normal" | "high" | "urgent";
+  status: "active" | "matched" | "closed" | "cancelled";
   created_at: string;
   updated_at: string;
 }
@@ -74,8 +74,8 @@ export interface Match {
   giver_user_id?: string;
   receiver_user_id?: string;
   score: number;
-  status: 'active' | 'pending_closure' | 'closed' | 'cancelled' | 'disputed';
-  closure_type?: 'successful' | 'cancelled' | 'expired' | 'disputed';
+  status: "active" | "pending_closure" | "closed" | "cancelled" | "disputed";
+  closure_type?: "successful" | "cancelled" | "expired" | "disputed";
   closed_at?: string;
   closed_by?: string;
   coins_awarded?: number;
@@ -91,7 +91,7 @@ export interface ChatThread {
   neighborhood_id?: string;
   participant_1_id?: string;
   participant_2_id?: string;
-  status: 'active' | 'closed' | 'archived';
+  status: "active" | "closed" | "archived";
   last_message_at?: string;
   created_at: string;
   updated_at?: string;
@@ -102,29 +102,49 @@ export interface ChatMessage {
   thread_id: string;
   sender_id: string;
   body: string;
-  message_type: 'text' | 'image' | 'location' | 'system';
+  message_type: "text" | "image" | "location" | "system";
   media_url?: string;
   metadata?: string;
   deleted_at?: string;
   created_at: string;
 }
 
+// Updated for multi-step flow:
+// draft_before → in_progress → pending_review → approved | rejected | expired
 export interface CleanifySubmission {
   id: string;
   user_id: string;
   neighborhood_id: string;
-  before_photo_url: string;
-  after_photo_url: string;
+
+  // Step 1 – before photo
+  before_photo_url: string | null;
+  before_photo_key: string | null;
+  before_uploaded_at: string | null;
+  started_at: string | null;
+
+  // Step 2 – after photo
+  after_photo_url: string | null;
+  after_photo_key: string | null;
+  after_uploaded_at: string | null;
+  completed_at: string | null;
+
   geo_lat?: number;
   geo_lng?: number;
   description?: string;
-  status: 'pending' | 'approved' | 'rejected';
+
+  status:
+    | "draft_before"
+    | "in_progress"
+    | "pending_review"
+    | "approved"
+    | "rejected"
+    | "expired";
+
+  reviewer_id: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
   coins_awarded: number;
-  submitted_at: string;
-  reviewed_at?: string;
-  reviewed_by?: string;
-  reviewer_id?: string;
-  review_note?: string;
+
   created_at: string;
   updated_at: string;
 }
@@ -159,7 +179,7 @@ export interface CoinLedgerEntry {
   amount: number;
   category: string;
   description?: string;
-  status: 'valid' | 'void';
+  status: "valid" | "void";
   created_by?: string;
   created_at: string;
 }

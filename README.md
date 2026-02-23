@@ -6,15 +6,15 @@ A complete backend implementation for the Wihda neighborhood civic application u
 
 This backend implements the full MVP specification with the following Cloudflare services:
 
-| Component | Cloudflare Service | Purpose |
-|-----------|-------------------|---------|
-| API Server | Workers (TypeScript) | REST API endpoints at `/v1/*` |
-| Database | D1 (SQLite) | All entities with UUID primary keys |
-| Object Storage | R2 | User photos, chat images |
-| Background Jobs | Queues + Cron Triggers | Matching, ingestion, notifications |
-| Real-time Chat | Durable Objects | WebSocket sessions, message ordering |
-| Rate Limiting | KV | Simple counters, flags |
-| Push Notifications | FCM | Via HTTP API from Workers |
+| Component          | Cloudflare Service     | Purpose                              |
+| ------------------ | ---------------------- | ------------------------------------ |
+| API Server         | Workers (TypeScript)   | REST API endpoints at `/v1/*`        |
+| Database           | D1 (SQLite)            | All entities with UUID primary keys  |
+| Object Storage     | R2                     | User photos, chat images             |
+| Background Jobs    | Queues + Cron Triggers | Matching, ingestion, notifications   |
+| Real-time Chat     | Durable Objects        | WebSocket sessions, message ordering |
+| Rate Limiting      | KV                     | Simple counters, flags               |
+| Push Notifications | FCM                    | Via HTTP API from Workers            |
 
 ## Project Structure
 
@@ -55,23 +55,27 @@ backend/
 ## API Endpoints
 
 ### Authentication
+
 - `POST /v1/auth/signup` - Create account
 - `POST /v1/auth/login` - Login, get JWT
 - `POST /v1/auth/refresh` - Refresh tokens
 - `GET /v1/auth/me` - Get current user
 
 ### User
+
 - `GET /v1/me` - Get profile with neighborhood & coins
 - `PATCH /v1/me` - Update profile
 - `GET /v1/me/coins` - Coin balance & ledger
 
 ### Neighborhoods
+
 - `GET /v1/neighborhoods/lookup` - Search by city/location
 - `GET /v1/neighborhoods/:id` - Get details
 - `POST /v1/neighborhoods/join` - Join neighborhood
 - `GET /v1/neighborhoods/:id/stats` - Statistics
 
 ### Leftovers
+
 - `POST /v1/leftovers/offers` - Create offer
 - `GET /v1/leftovers/offers` - List offers
 - `POST /v1/leftovers/needs` - Create need
@@ -80,6 +84,7 @@ backend/
 - `POST /v1/leftovers/matches/:id/close` - Close match
 
 ### Chat
+
 - `GET /v1/chats` - List threads
 - `GET /v1/chats/:thread_id` - Thread metadata
 - `GET /v1/chats/:thread_id/messages` - Paginated messages
@@ -87,29 +92,39 @@ backend/
 - `GET /v1/chats/:thread_id/ws` - WebSocket endpoint
 
 ### Cleanify
-- `POST /v1/cleanify/submissions` - Create submission
-- `GET /v1/cleanify/submissions` - List submissions
-- `POST /v1/cleanify/submissions/:id/approve` - Approve (mod)
-- `POST /v1/cleanify/submissions/:id/reject` - Reject (mod)
-- `GET /v1/cleanify/stats` - Statistics
+
+- `POST /v1/cleanify/start` - Create a new submission draft (returns `submission_id`)
+- `POST /v1/cleanify/:id/before/presigned-url` - Get a presigned R2 upload URL for the before photo
+- `POST /v1/cleanify/:id/before/confirm` - Confirm before photo upload; opens the 20-minute gate
+- `POST /v1/cleanify/:id/after/presigned-url` - Get a presigned R2 upload URL for the after photo (enforces ≥20 min since before, ≤48 hr window)
+- `POST /v1/cleanify/:id/after/confirm` - Confirm after photo upload; sets status to `pending_review`
+- `GET /v1/cleanify/submissions` - List own submissions, or `?pending=true` for moderators to see the review queue
+- `GET /v1/cleanify/submissions/:id` - Get a single submission (owner or moderator)
+- `POST /v1/cleanify/submissions/:id/approve` - Approve submission and award coins (moderator only)
+- `POST /v1/cleanify/submissions/:id/reject` - Reject submission with a required note (moderator only)
+- `GET /v1/cleanify/stats` - Submission statistics for a neighborhood and the current user
 
 ### Campaigns
+
 - `GET /v1/campaigns` - List for neighborhood
 - `GET /v1/campaigns/:id` - Get details
 
 ### Uploads
+
 - `POST /v1/uploads/presigned-url` - Get upload URL
 - `POST /v1/uploads/direct` - Direct upload
 - `GET /v1/uploads/:key` - Serve file
 - `DELETE /v1/uploads/:key` - Delete file
 
 ### Notifications
+
 - `GET /v1/notifications` - List notifications
 - `POST /v1/notifications/read` - Mark as read
 
 ## Development
 
 ### Prerequisites
+
 - Node.js 18+
 - Wrangler CLI: `npm install -g wrangler`
 - Cloudflare account
@@ -150,21 +165,25 @@ npm run db:migrate:remote
 ### Configuration
 
 1. Create D1 database:
+
 ```bash
 wrangler d1 create wihda-db
 ```
 
 2. Create KV namespace:
+
 ```bash
 wrangler kv:namespace create KV
 ```
 
 3. Create R2 bucket:
+
 ```bash
 wrangler r2 bucket create wihda-uploads
 ```
 
 4. Create queues:
+
 ```bash
 wrangler queues create wihda-matching-queue
 wrangler queues create wihda-campaign-queue
@@ -174,6 +193,7 @@ wrangler queues create wihda-notification-queue
 5. Update `wrangler.toml` with actual IDs
 
 6. Set secrets:
+
 ```bash
 wrangler secret put JWT_SECRET
 wrangler secret put FCM_SERVER_KEY
@@ -182,22 +202,26 @@ wrangler secret put FCM_SERVER_KEY
 ## Key Features
 
 ### Idempotency
+
 - Coin awards use unique constraint on `(source_type, source_id, user_id)`
 - Match closures are idempotent via status checks
 - Prevents duplicate rewards
 
 ### Matching Algorithm
+
 - Scoring based on: food type, diet constraints, portions, pickup time, distance
 - Minimum threshold: 0.4 score
 - Event-driven via Queue + scheduled matching
 
 ### Real-time Chat
+
 - Durable Object per thread
 - WebSocket connections
 - Message persistence in D1
 - Read receipts
 
 ### Anti-abuse
+
 - Rate limits via KV
 - Pair repetition tracking
 - Moderator oversight
@@ -205,11 +229,11 @@ wrangler secret put FCM_SERVER_KEY
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| ENVIRONMENT | `development` / `staging` / `production` |
-| JWT_SECRET | Secret for JWT signing |
-| FCM_SERVER_KEY | Firebase Cloud Messaging server key |
+| Variable       | Description                              |
+| -------------- | ---------------------------------------- |
+| ENVIRONMENT    | `development` / `staging` / `production` |
+| JWT_SECRET     | Secret for JWT signing                   |
+| FCM_SERVER_KEY | Firebase Cloud Messaging server key      |
 
 ## Monitoring
 

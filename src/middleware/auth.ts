@@ -1,17 +1,18 @@
 /**
  * Wihda Backend - Authentication Middleware
- * JWT validation and user context extraction
  */
 
 import { Context, Next } from "hono";
 import { verifyJWT } from "../lib/utils";
-import type { Env } from "../types";
+import type { Env, VerificationStatus } from "../types";
 
-// Extend Hono context with user info
 export interface AuthContext {
   userId: string;
   userRole: "user" | "moderator" | "admin";
   neighborhoodId: string | null;
+  verificationStatus: VerificationStatus;
+  /** 'full' = normal access; 'verification_only' = post-signup restricted token */
+  scope: "full" | "verification_only";
 }
 
 declare module "hono" {
@@ -20,8 +21,22 @@ declare module "hono" {
   }
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function unauthorizedResponse(
+  c: Context,
+  code: string,
+  message: string,
+  status: 401 | 403 = 401,
+) {
+  return c.json({ success: false, error: { code, message } }, status);
+}
+
+// ─── Core auth middleware ──────────────────────────────────────────────────────
+
 /**
- * Extract and validate JWT token from Authorization header
+ * Validates the Bearer JWT and populates c.var.auth.
+ * Does NOT enforce verification status — chain requireVerified for that.
  */
 export async function authMiddleware(
   c: Context<{ Bindings: Env }>,
@@ -29,16 +44,11 @@ export async function authMiddleware(
 ) {
   const authHeader = c.req.header("Authorization");
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return c.json(
-      {
-        success: false,
-        error: {
-          code: "MISSING_TOKEN",
-          message: "Authorization header with Bearer token is required",
-        },
-      },
-      401,
+  if (!authHeader?.startsWith("Bearer ")) {
+    return unauthorizedResponse(
+      c,
+      "MISSING_TOKEN",
+      "Authorization header with Bearer token is required",
     );
   }
 
@@ -46,29 +56,30 @@ export async function authMiddleware(
   const payload = await verifyJWT(token, c.env.JWT_SECRET);
 
   if (!payload) {
-    return c.json(
-      {
-        success: false,
-        error: {
-          code: "INVALID_TOKEN",
-          message: "Token is invalid or expired",
-        },
-      },
-      401,
+    return unauthorizedResponse(
+      c,
+      "INVALID_TOKEN",
+      "Token is invalid or expired",
     );
   }
 
+  // payload.verification_status and payload.scope are string | null in JWTOutput;
+  // fall back to safe defaults for tokens issued before KYC was introduced.
   c.set("auth", {
     userId: payload.sub,
     userRole: payload.role as AuthContext["userRole"],
     neighborhoodId: payload.neighborhood_id,
+    verificationStatus: (payload.verification_status ??
+      "unverified") as VerificationStatus,
+    scope: (payload.scope ?? "full") as AuthContext["scope"],
   });
 
   await next();
 }
 
 /**
- * Optional auth - doesn't fail if no token, but sets context if present
+ * Optional auth — never fails; populates context only when a valid token
+ * is present.
  */
 export async function optionalAuthMiddleware(
   c: Context<{ Bindings: Env }>,
@@ -76,7 +87,7 @@ export async function optionalAuthMiddleware(
 ) {
   const authHeader = c.req.header("Authorization");
 
-  if (authHeader && authHeader.startsWith("Bearer ")) {
+  if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.substring(7);
     const payload = await verifyJWT(token, c.env.JWT_SECRET);
 
@@ -85,6 +96,9 @@ export async function optionalAuthMiddleware(
         userId: payload.sub,
         userRole: payload.role as AuthContext["userRole"],
         neighborhoodId: payload.neighborhood_id,
+        verificationStatus: (payload.verification_status ??
+          "unverified") as VerificationStatus,
+        scope: (payload.scope ?? "full") as AuthContext["scope"],
       });
     }
   }
@@ -92,10 +106,47 @@ export async function optionalAuthMiddleware(
   await next();
 }
 
+// ─── Role / verification guards ───────────────────────────────────────────────
+
 /**
- * Require moderator or admin role
- * Uses INSUFFICIENT_PERMISSIONS code to match API contract
+ * Requires the user to have completed KYC.
+ * Chain AFTER authMiddleware.
+ *
+ * Also blocks 'verification_only' scoped tokens — those are only valid for
+ * /v1/verification/* routes.
  */
+export async function requireVerified(
+  c: Context<{ Bindings: Env }>,
+  next: Next,
+) {
+  const auth = c.get("auth");
+
+  if (!auth) {
+    return unauthorizedResponse(c, "UNAUTHORIZED", "Authentication required");
+  }
+
+  if (auth.scope === "verification_only") {
+    return unauthorizedResponse(
+      c,
+      "VERIFICATION_TOKEN_RESTRICTED",
+      "This token can only be used for verification endpoints. Complete identity verification first.",
+      403,
+    );
+  }
+
+  if (auth.verificationStatus !== "verified") {
+    return unauthorizedResponse(
+      c,
+      "VERIFICATION_REQUIRED",
+      "Identity verification is required to access this resource.",
+      403,
+    );
+  }
+
+  await next();
+}
+
+/** Requires moderator or admin role. Chain AFTER authMiddleware. */
 export async function requireModerator(
   c: Context<{ Bindings: Env }>,
   next: Next,
@@ -103,24 +154,14 @@ export async function requireModerator(
   const auth = c.get("auth");
 
   if (!auth) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "UNAUTHORIZED", message: "Authentication required" },
-      },
-      401,
-    );
+    return unauthorizedResponse(c, "UNAUTHORIZED", "Authentication required");
   }
 
   if (auth.userRole !== "moderator" && auth.userRole !== "admin") {
-    return c.json(
-      {
-        success: false,
-        error: {
-          code: "INSUFFICIENT_PERMISSIONS",
-          message: "Moderator or admin access required",
-        },
-      },
+    return unauthorizedResponse(
+      c,
+      "INSUFFICIENT_PERMISSIONS",
+      "Moderator or admin access required",
       403,
     );
   }
@@ -128,31 +169,19 @@ export async function requireModerator(
   await next();
 }
 
-/**
- * Require admin role
- */
+/** Requires admin role. Chain AFTER authMiddleware. */
 export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
   const auth = c.get("auth");
 
   if (!auth) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "UNAUTHORIZED", message: "Authentication required" },
-      },
-      401,
-    );
+    return unauthorizedResponse(c, "UNAUTHORIZED", "Authentication required");
   }
 
   if (auth.userRole !== "admin") {
-    return c.json(
-      {
-        success: false,
-        error: {
-          code: "INSUFFICIENT_PERMISSIONS",
-          message: "Admin access required",
-        },
-      },
+    return unauthorizedResponse(
+      c,
+      "INSUFFICIENT_PERMISSIONS",
+      "Admin access required",
       403,
     );
   }
@@ -160,10 +189,7 @@ export async function requireAdmin(c: Context<{ Bindings: Env }>, next: Next) {
   await next();
 }
 
-/**
- * Require user to have a neighborhood
- * Uses NEIGHBORHOOD_REQUIRED code to match API contract
- */
+/** Requires the user to have joined a neighborhood. Chain AFTER authMiddleware. */
 export async function requireNeighborhood(
   c: Context<{ Bindings: Env }>,
   next: Next,
@@ -171,13 +197,7 @@ export async function requireNeighborhood(
   const auth = c.get("auth");
 
   if (!auth) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "UNAUTHORIZED", message: "Authentication required" },
-      },
-      401,
-    );
+    return unauthorizedResponse(c, "UNAUTHORIZED", "Authentication required");
   }
 
   if (!auth.neighborhoodId) {
@@ -196,24 +216,18 @@ export async function requireNeighborhood(
   await next();
 }
 
-/**
- * Get auth context from Hono context
- */
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
 export function getAuthContext(
   c: Context<{ Bindings: Env }>,
 ): AuthContext | null {
-  return c.get("auth") || null;
+  return c.get("auth") ?? null;
 }
 
-/**
- * Check if user owns a resource or is moderator/admin
- */
 export function canModifyResource(
   auth: AuthContext,
   resourceUserId: string,
 ): boolean {
-  if (auth.userRole === "admin" || auth.userRole === "moderator") {
-    return true;
-  }
+  if (auth.userRole === "admin" || auth.userRole === "moderator") return true;
   return auth.userId === resourceUserId;
 }

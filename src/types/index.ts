@@ -1,6 +1,5 @@
 /**
  * Wihda Backend - Type Definitions
- * All entities mapped from database schema
  */
 
 // ============================================
@@ -8,27 +7,24 @@
 // ============================================
 
 export interface Env {
-  // D1 Database
   DB: D1Database;
-
-  // R2 Storage
   STORAGE: R2Bucket;
-
-  // KV Namespace
   KV: KVNamespace;
 
-  // Queues
   MATCHING_QUEUE: Queue<MatchingQueueMessage>;
   CAMPAIGN_QUEUE: Queue<CampaignQueueMessage>;
   NOTIFICATION_QUEUE: Queue<NotificationQueueMessage>;
+  VERIFICATION_QUEUE: Queue<VerificationQueueMessage>;
 
-  // Durable Objects
   CHAT_DO: DurableObjectNamespace;
 
-  // Environment variables
   ENVIRONMENT: string;
   JWT_SECRET: string;
   FCM_SERVER_KEY: string;
+  GEMINI_API_KEY: string;
+  /** Shared secret that the verification queue consumer uses to authenticate
+   *  to the internal webhook endpoint. Set via: wrangler secret put INTERNAL_WEBHOOK_SECRET */
+  INTERNAL_WEBHOOK_SECRET: string;
 }
 
 // ============================================
@@ -37,6 +33,11 @@ export interface Env {
 
 export type UserRole = "user" | "moderator" | "admin";
 export type UserStatus = "active" | "banned" | "suspended";
+export type VerificationStatus =
+  | "unverified"
+  | "pending"
+  | "verified"
+  | "failed";
 
 export interface User {
   id: string;
@@ -46,6 +47,7 @@ export interface User {
   display_name: string;
   role: UserRole;
   status: UserStatus;
+  verification_status: VerificationStatus;
   language_preference: string;
   fcm_token: string | null;
   created_at: string;
@@ -62,6 +64,47 @@ export interface UserPublic {
 export interface UserWithNeighborhood extends User {
   neighborhood_id: string | null;
   neighborhood_name: string | null;
+}
+
+// ============================================
+// Verification Types
+// ============================================
+
+export type VerificationSessionStatus =
+  | "created"
+  | "pending"
+  | "processing"
+  | "verified"
+  | "failed"
+  | "expired";
+
+export interface VerificationSession {
+  id: string;
+  user_id: string;
+  front_doc_key: string | null;
+  back_doc_key: string | null;
+  selfie_key: string | null;
+  status: VerificationSessionStatus;
+  ai_result: string | null;
+  ai_confidence: number | null;
+  ai_rejection_reason: string | null;
+  ai_reviewed_at: string | null;
+  manual_reviewer_id: string | null;
+  manual_reviewed_at: string | null;
+  manual_note: string | null;
+  attempt_count: number;
+  last_attempt_at: string | null;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type VerificationDocumentType = "front" | "back" | "selfie";
+
+export interface PresignedUrlResponse {
+  upload_url: string;
+  file_key: string;
+  expires_at: string;
 }
 
 // ============================================
@@ -104,7 +147,6 @@ export type CoinSourceType =
   | "referral_bonus";
 
 export type CoinStatus = "valid" | "void";
-
 export type CoinCategory = "leftovers" | "cleanify" | "admin" | "bonus";
 
 export interface CoinLedgerEntry {
@@ -272,50 +314,34 @@ export interface ChatMessageWithSender extends ChatMessage {
 // Cleanify Types
 // ============================================
 
-export interface CleanifySubmissionWithUser extends CleanifySubmission {
-  user_name: string;
-}
-
 export type CleanifyStatus =
-  | "draft_before" // Created; waiting for before photo upload
-  | "in_progress" // Before photo confirmed; waiting for after photo (≥20 min gate)
-  | "pending_review" // After photo confirmed; awaiting moderator review
+  | "draft_before"
+  | "in_progress"
+  | "pending_review"
   | "approved"
   | "rejected"
-  | "expired"; // 48-hour completion window elapsed
+  | "expired";
 
 export interface CleanifySubmission {
   id: string;
   user_id: string;
   neighborhood_id: string;
-
-  // before photo
   before_photo_url: string | null;
   before_photo_key: string | null;
   before_uploaded_at: string | null;
   started_at: string | null;
-
-  // after photo
   after_photo_url: string | null;
   after_photo_key: string | null;
   after_uploaded_at: string | null;
   completed_at: string | null;
-
-  // Optional metadata
   geo_lat: number | null;
   geo_lng: number | null;
   description: string | null;
-
-  // Lifecycle
   status: CleanifyStatus;
-
-  // Moderation
   reviewer_id: string | null;
   reviewed_at: string | null;
   review_note: string | null;
   coins_awarded: number;
-
-  // Audit
   created_at: string;
   updated_at: string;
 }
@@ -324,7 +350,6 @@ export interface CleanifySubmissionWithUser extends CleanifySubmission {
   user_name: string;
 }
 
-// DTOs
 export interface StartCleanifyRequest {
   geo_lat?: number;
   geo_lng?: number;
@@ -336,7 +361,7 @@ export interface ConfirmPhotoRequest {
 }
 
 export interface ReviewCleanifyRequest {
-  note?: string; // Required on reject, optional on approve
+  note?: string;
 }
 
 // ============================================
@@ -380,7 +405,9 @@ export type NotificationType =
   | "cleanify_approved"
   | "cleanify_rejected"
   | "campaign_new"
-  | "system";
+  | "system"
+  | "verification_approved"
+  | "verification_rejected";
 
 export interface Notification {
   id: string;
@@ -405,7 +432,9 @@ export type ModerationActionType =
   | "coin_void"
   | "user_ban"
   | "user_unban"
-  | "content_remove";
+  | "content_remove"
+  | "verification_approve"
+  | "verification_reject";
 
 export interface ModerationLog {
   id: string;
@@ -446,9 +475,26 @@ export interface NotificationQueueMessage {
   timestamp: string;
 }
 
+export interface VerificationQueueMessage {
+  type: "run_ai_check" | "expire_sessions";
+  session_id?: string;
+  user_id?: string;
+  timestamp: string;
+}
+
 // ============================================
-// API Types
+// JWT & API Types
 // ============================================
+
+export interface JWTPayload {
+  sub: string;
+  role: UserRole;
+  neighborhood_id: string | null;
+  verification_status: VerificationStatus;
+  scope: "full" | "verification_only";
+  iat: number;
+  exp: number;
+}
 
 export interface ApiResponse<T = unknown> {
   success: boolean;
@@ -467,19 +513,10 @@ export interface PaginatedResponse<T> {
   total?: number;
 }
 
-export interface JWTPayload {
-  sub: string; // user_id
-  role: UserRole;
-  neighborhood_id: string | null;
-  iat: number;
-  exp: number;
-}
-
 // ============================================
 // Request/Response DTOs
 // ============================================
 
-// Auth
 export interface SignupRequest {
   email?: string;
   phone?: string;
@@ -494,21 +531,31 @@ export interface LoginRequest {
   password: string;
 }
 
+/**
+ * POST /v1/auth/signup response.
+ * Intentionally does NOT contain full access/refresh tokens — those are
+ * only issued after KYC verification is complete.
+ */
+export interface SignupResponse {
+  verification_session_id: string;
+  restricted_token: string;
+  expires_in: number;
+  user: { id: string; display_name: string };
+}
+
 export interface LoginResponse {
   access_token: string;
   refresh_token: string;
   expires_in: number;
-  user: UserPublic;
+  user: UserPublic & { verification_status: VerificationStatus };
 }
 
-// User
 export interface UpdateProfileRequest {
   display_name?: string;
   language_preference?: string;
   fcm_token?: string;
 }
 
-// Neighborhood
 export interface JoinNeighborhoodRequest {
   neighborhood_id: string;
 }
@@ -520,7 +567,6 @@ export interface LookupNeighborhoodRequest {
   lng?: number;
 }
 
-// Leftovers
 export interface CreateOfferRequest {
   title: string;
   description?: string;
@@ -541,28 +587,12 @@ export interface CloseMatchRequest {
   dispute_reason?: string;
 }
 
-// Chat
 export interface SendMessageRequest {
   body: string;
   message_type?: MessageType;
   media_url?: string;
 }
 
-// Cleanify
-export interface CreateCleanifyRequest {
-  before_photo_url: string;
-  after_photo_url: string;
-  geo_lat?: number;
-  geo_lng?: number;
-  description?: string;
-}
-
-export interface ReviewCleanifyRequest {
-  approve: boolean;
-  note?: string;
-}
-
-// Image Upload
 export interface UploadUrlRequest {
   content_type: "before_photo" | "after_photo" | "chat_image";
   file_extension: string;

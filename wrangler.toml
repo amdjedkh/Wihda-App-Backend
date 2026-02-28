@@ -45,6 +45,11 @@ binding = "CAMPAIGN_QUEUE"
 queue = "wihda-notification-queue"
 binding = "NOTIFICATION_QUEUE"
 
+# Queue for verification
+[[queues.producers]]
+queue = "wihda-verification-queue"
+binding = "VERIFICATION_QUEUE"
+
 # Queue consumers
 [[queues.consumers]]
 queue = "wihda-matching-queue"
@@ -63,6 +68,13 @@ queue = "wihda-notification-queue"
 max_batch_size = 50
 max_batch_timeout = 10
 max_retries = 5
+
+[[queues.consumers]]
+queue = "wihda-verification-queue"
+max_batch_size = 5
+max_batch_timeout = 30
+max_retries = 3
+dead_letter_queue = "wihda-verification-dlq"
 
 # Durable Objects for Chat
 [[durable_objects.bindings]]
@@ -83,6 +95,8 @@ crons = ["0 */12 * * *"]  # Every 12 hours for campaign ingestion
 ENVIRONMENT = "development"
 JWT_SECRET = "dev-jwt-secret-change-in-production"
 FCM_SERVER_KEY = ""
+GEMINI_API_KEY = ""
+INTERNAL_WEBHOOK_SECRET = "ahlelele-ahlelas"
 
 # Production overrides
 [env.production]

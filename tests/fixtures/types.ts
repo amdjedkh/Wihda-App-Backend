@@ -10,6 +10,7 @@ export interface User {
   display_name: string;
   role: "user" | "moderator" | "admin";
   status: "active" | "suspended" | "banned" | "deleted";
+  verification_status: "unverified" | "pending" | "verified" | "failed";
   language_preference?: string;
   fcm_token?: string;
   created_at: string;
@@ -109,29 +110,21 @@ export interface ChatMessage {
   created_at: string;
 }
 
-// Updated for multi-step flow:
-// draft_before → in_progress → pending_review → approved | rejected | expired
 export interface CleanifySubmission {
   id: string;
   user_id: string;
   neighborhood_id: string;
-
-  // Step 1 – before photo
   before_photo_url: string | null;
   before_photo_key: string | null;
   before_uploaded_at: string | null;
   started_at: string | null;
-
-  // Step 2 – after photo
   after_photo_url: string | null;
   after_photo_key: string | null;
   after_uploaded_at: string | null;
   completed_at: string | null;
-
   geo_lat?: number;
   geo_lng?: number;
   description?: string;
-
   status:
     | "draft_before"
     | "in_progress"
@@ -139,12 +132,10 @@ export interface CleanifySubmission {
     | "approved"
     | "rejected"
     | "expired";
-
   reviewer_id: string | null;
   reviewed_at: string | null;
   review_note: string | null;
   coins_awarded: number;
-
   created_at: string;
   updated_at: string;
 }

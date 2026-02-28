@@ -31,6 +31,7 @@ backend/
 │   │   └── auth.ts           # JWT validation, role checks
 │   ├── routes/               # API route handlers
 │   │   ├── auth.ts           # /v1/auth/*
+│   │   ├── verification.ts   # /v1/verification/*
 │   │   ├── user.ts           # /v1/me
 │   │   ├── neighborhood.ts   # /v1/neighborhoods/*
 │   │   ├── leftovers.ts      # /v1/leftovers/*
@@ -41,11 +42,13 @@ backend/
 │   ├── queues/               # Queue consumers
 │   │   ├── matching.ts       # Match offer/need pairs
 │   │   ├── campaign.ts       # Campaign ingestion
-│   │   └── notification.ts   # FCM push notifications
+│   │   ├── notification.ts   # FCM push notifications
+│   │   └── verification.ts   # Gemini Vision AI document review
 │   └── durable-objects/
 │       └── ChatThreadDurableObject.ts  # WebSocket chat
 ├── migrations/
 │   ├── schema.sql            # Database schema
+│   ├── 0003_kyc_verification.sql  # KYC verification tables
 │   └── seed.sql              # Initial seed data
 ├── wrangler.toml             # Cloudflare Workers config
 ├── package.json
@@ -56,10 +59,21 @@ backend/
 
 ### Authentication
 
-- `POST /v1/auth/signup` - Create account
-- `POST /v1/auth/login` - Login, get JWT
+- `POST /v1/auth/signup` - Create account — returns `restricted_token` + `verification_session_id` (no full access until KYC complete)
+- `POST /v1/auth/login` - Login (requires `verified` status)
 - `POST /v1/auth/refresh` - Refresh tokens
 - `GET /v1/auth/me` - Get current user
+
+### Identity Verification (KYC)
+
+New users must complete this flow before any protected endpoint is accessible.
+
+- `POST /v1/verification/start` - Open or reuse a verification session
+- `POST /v1/verification/presigned-url` - Get R2 upload URL for one document (`front`, `back`, `selfie`)
+- `POST /v1/verification/submit` - Submit documents for Gemini Vision AI review (~1–2 min)
+- `GET /v1/verification/status` - Poll current verification status
+- `POST /v1/verification/webhook` - Internal: called by queue consumer with AI result (protected by `INTERNAL_WEBHOOK_SECRET`)
+- `POST /v1/verification/admin/review` - Manual approve/reject override (admin only)
 
 ### User
 
@@ -188,6 +202,8 @@ wrangler r2 bucket create wihda-uploads
 wrangler queues create wihda-matching-queue
 wrangler queues create wihda-campaign-queue
 wrangler queues create wihda-notification-queue
+wrangler queues create wihda-verification-queue
+wrangler queues create wihda-verification-dlq
 ```
 
 5. Update `wrangler.toml` with actual IDs
@@ -197,6 +213,8 @@ wrangler queues create wihda-notification-queue
 ```bash
 wrangler secret put JWT_SECRET
 wrangler secret put FCM_SERVER_KEY
+wrangler secret put GEMINI_API_KEY
+wrangler secret put INTERNAL_WEBHOOK_SECRET
 ```
 
 ## Key Features
@@ -229,11 +247,13 @@ wrangler secret put FCM_SERVER_KEY
 
 ## Environment Variables
 
-| Variable       | Description                              |
-| -------------- | ---------------------------------------- |
-| ENVIRONMENT    | `development` / `staging` / `production` |
-| JWT_SECRET     | Secret for JWT signing                   |
-| FCM_SERVER_KEY | Firebase Cloud Messaging server key      |
+| Variable                | Description                                      |
+| ----------------------- | ------------------------------------------------ |
+| ENVIRONMENT             | `development` / `staging` / `production`         |
+| JWT_SECRET              | Secret for JWT signing                           |
+| FCM_SERVER_KEY          | Firebase Cloud Messaging server key              |
+| GEMINI_API_KEY          | Google Gemini API key (for KYC document review)  |
+| INTERNAL_WEBHOOK_SECRET | Shared secret between queue consumer and webhook |
 
 ## Monitoring
 

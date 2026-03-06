@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import { vi } from "vitest";
 import type { Env } from "../src/types";
 import authRoutes from "../src/routes/auth";
+import userRoutes from "../src/routes/user";
 import verificationRoutes from "../src/routes/verification";
 import { createMockEnv } from "./fixtures";
 
@@ -34,6 +35,7 @@ import { createMockEnv } from "./fixtures";
 export function createTestApp() {
   const app = new Hono<{ Bindings: Env }>();
   app.route("/v1/auth", authRoutes);
+  app.route("/v1/me", userRoutes);
   app.route("/v1/verification", verificationRoutes);
   return app;
 }

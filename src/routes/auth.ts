@@ -3,7 +3,6 @@
  * POST /v1/auth/signup
  * POST /v1/auth/login
  * POST /v1/auth/refresh
- * GET  /v1/auth/me
  */
 
 import { Hono } from "hono";
@@ -25,7 +24,6 @@ import {
   successResponse,
   errorResponse,
 } from "../lib/utils";
-import { authMiddleware, getAuthContext } from "../middleware/auth";
 
 const auth = new Hono<{ Bindings: Env }>();
 
@@ -320,36 +318,6 @@ auth.post("/refresh", async (c) => {
     console.error("Refresh error:", error);
     return errorResponse("INTERNAL_ERROR", "Failed to refresh token", 500);
   }
-});
-
-// ─── GET /v1/auth/me ──────────────────────────────────────────────────────────
-
-auth.get("/me", authMiddleware, async (c) => {
-  const authCtx = getAuthContext(c);
-  if (!authCtx)
-    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
-
-  const user = await getUserById(c.env.DB, authCtx.userId);
-  if (!user) return errorResponse("USER_NOT_FOUND", "User not found", 404);
-
-  const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
-
-  return successResponse({
-    id: user.id,
-    email: user.email,
-    phone: user.phone,
-    display_name: user.display_name,
-    role: user.role,
-    verification_status: user.verification_status,
-    language_preference: user.language_preference,
-    neighborhood: userNeighborhood
-      ? {
-          id: userNeighborhood.neighborhood_id,
-          joined_at: userNeighborhood.joined_at,
-        }
-      : null,
-    created_at: user.created_at,
-  });
 });
 
 export default auth;

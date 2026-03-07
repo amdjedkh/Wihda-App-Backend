@@ -38,6 +38,7 @@ import {
 } from "./queues/notification";
 import { handleVerificationQueue } from "./queues/verification";
 import { handleCleanifyQueue } from "./queues/cleanify";
+import contactRoutes from "./routes/contact";
 
 // Import Durable Object
 import { ChatThreadDurableObject } from "./durable-objects/ChatThreadDurableObject";
@@ -85,6 +86,7 @@ app.get("/v1", (c) =>
       campaigns: "/v1/campaigns",
       uploads: "/v1/uploads",
       notifications: "/v1/notifications",
+      contact: "/v1/contact",
     },
   }),
 );
@@ -92,6 +94,7 @@ app.get("/v1", (c) =>
 // ─── Route mounting ───────────────────────────────────────────────────────────
 
 app.route("/v1/auth", authRoutes);
+app.route("/v1/contact", contactRoutes);
 app.route("/v1/verification", verificationRoutes);
 app.route("/v1/me", userRoutes);
 app.route("/v1/neighborhoods", neighborhoodRoutes);

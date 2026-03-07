@@ -328,6 +328,7 @@ export function createMockEnv() {
     NOTIFICATION_QUEUE: createMockQueue(),
     CAMPAIGN_QUEUE: createMockQueue(),
     VERIFICATION_QUEUE: createMockQueue(),
+    CLEANIFY_QUEUE: createMockQueue(),
 
     CHAT_DO: {
       idFromString: vi.fn((id: string) => ({ toString: () => id })),

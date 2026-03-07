@@ -15,6 +15,7 @@ export interface Env {
   CAMPAIGN_QUEUE: Queue<CampaignQueueMessage>;
   NOTIFICATION_QUEUE: Queue<NotificationQueueMessage>;
   VERIFICATION_QUEUE: Queue<VerificationQueueMessage>;
+  CLEANIFY_QUEUE: Queue<CleanifyQueueMessage>;
 
   CHAT_DO: DurableObjectNamespace;
 
@@ -482,6 +483,14 @@ export interface VerificationQueueMessage {
   timestamp: string;
 }
 
+export interface CleanifyQueueMessage {
+  type: "run_ai_check";
+  submission_id: string;
+  user_id: string;
+  neighborhood_id: string;
+  timestamp: string;
+}
+
 // ============================================
 // JWT & API Types
 // ============================================
@@ -531,11 +540,6 @@ export interface LoginRequest {
   password: string;
 }
 
-/**
- * POST /v1/auth/signup response.
- * Intentionally does NOT contain full access/refresh tokens — those are
- * only issued after KYC verification is complete.
- */
 export interface SignupResponse {
   verification_session_id: string;
   restricted_token: string;

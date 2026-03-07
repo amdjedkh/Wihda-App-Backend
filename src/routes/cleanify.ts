@@ -514,13 +514,13 @@ cleanify.post("/:id/after/confirm", authMiddleware, async (c) => {
     .bind(photoUrl, file_key, now, now, now, id)
     .run();
 
-  // Notify moderators a new submission is waiting
-  await c.env.NOTIFICATION_QUEUE.send({
-    user_id: auth.userId, // sender context; mod notification handled in queue consumer
-    type: "system",
-    title: "New Cleanify Submission",
-    body: "A new cleanify submission is awaiting review.",
-    data: { submission_id: id, neighborhood_id: submission.neighborhood_id },
+  // Enqueue AI photo review — Gemini will approve/reject and award coins automatically.
+  // Moderator approve/reject endpoints remain available as manual overrides.
+  await c.env.CLEANIFY_QUEUE.send({
+    type: "run_ai_check",
+    submission_id: id,
+    user_id: auth.userId,
+    neighborhood_id: submission.neighborhood_id,
     timestamp: now,
   });
 

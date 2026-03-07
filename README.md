@@ -107,11 +107,13 @@ New users must complete this flow before any protected endpoint is accessible.
 
 ### Cleanify
 
+Submissions are automatically reviewed by Gemini Vision AI, which checks that both photos show the same location with a visible improvement. Moderator approve/reject endpoints remain available as manual overrides for disputed or edge-case submissions.
+
 - `POST /v1/cleanify/start` - Create a new submission draft (returns `submission_id`)
 - `POST /v1/cleanify/:id/before/presigned-url` - Get a presigned R2 upload URL for the before photo
 - `POST /v1/cleanify/:id/before/confirm` - Confirm before photo upload; opens the 20-minute gate
 - `POST /v1/cleanify/:id/after/presigned-url` - Get a presigned R2 upload URL for the after photo (enforces ≥20 min since before, ≤48 hr window)
-- `POST /v1/cleanify/:id/after/confirm` - Confirm after photo upload; sets status to `pending_review`
+- `POST /v1/cleanify/:id/after/confirm` - Confirm after photo upload; triggers AI photo verification via Gemini Vision (~async). Sets status to `pending_review`.
 - `GET /v1/cleanify/submissions` - List own submissions, or `?pending=true` for moderators to see the review queue
 - `GET /v1/cleanify/submissions/:id` - Get a single submission (owner or moderator)
 - `POST /v1/cleanify/submissions/:id/approve` - Approve submission and award coins (moderator only)
@@ -204,6 +206,7 @@ wrangler queues create wihda-campaign-queue
 wrangler queues create wihda-notification-queue
 wrangler queues create wihda-verification-queue
 wrangler queues create wihda-verification-dlq
+wrangler queues create wihda-cleanify-queue
 ```
 
 5. Update `wrangler.toml` with actual IDs

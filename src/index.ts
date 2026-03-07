@@ -42,6 +42,7 @@ import contactRoutes from "./routes/contact";
 
 // Import Durable Object
 import { ChatThreadDurableObject } from "./durable-objects/ChatThreadDurableObject";
+import contactVerification from "./routes/contact-verification";
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -94,6 +95,7 @@ app.get("/v1", (c) =>
 // ─── Route mounting ───────────────────────────────────────────────────────────
 
 app.route("/v1/auth", authRoutes);
+app.route("/v1/auth/verify", contactVerification);
 app.route("/v1/contact", contactRoutes);
 app.route("/v1/verification", verificationRoutes);
 app.route("/v1/me", userRoutes);

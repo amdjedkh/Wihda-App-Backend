@@ -106,6 +106,8 @@ JWT_SECRET = "dev-jwt-secret-change-in-production"
 FCM_SERVER_KEY = ""
 GEMINI_API_KEY = ""
 INTERNAL_WEBHOOK_SECRET = "ahlelele-ahlelas"
+RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
+TWILIO_PHONE_NUMBER = "+1XXXXXXXXXX" 
 
 # Production overrides
 [env.production]

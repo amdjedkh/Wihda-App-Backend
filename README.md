@@ -23,8 +23,9 @@ This backend implements the full MVP specification with the following Cloudflare
 ├── migrations/
 │   ├── schema.sql                      # Base database schema
 │   ├── 0002_cleanify_multi_step.sql    # Cleanify multi-step submission tables
-│   ├── 0003_kyc_verification.sql       # KYC verification tables
+│   ├── 0003_kyc_verification.sql       # KYC verification tables + user backfill
 │   ├── 0004_contact_submissions.sql    # Public contact form submissions
+│   ├── 0005_contact_verification.sql   # OTP email/phone verification table
 │   └── seed.sql                        # Initial seed data
 ├── scripts/
 │   └── test-api.sh                     # Manual API smoke tests
@@ -41,8 +42,9 @@ This backend implements the full MVP specification with the following Cloudflare
 │   │   └── auth.ts                     # authMiddleware, requireVerified, requireModerator, requireAdmin, requireNeighborhood
 │   ├── routes/
 │   │   ├── auth.ts                     # /v1/auth/*
-│   │   ├── verification.ts             # /v1/verification/*
-│   │   ├── user.ts                     # /v1/me, /v1/me/:userId
+│   │   ├── contact-verification.ts     # /v1/auth/verify/* (OTP email + phone)
+│   │   ├── verification.ts             # /v1/verification/* (KYC)
+│   │   ├── user.ts                     # /v1/me, /v1/users/:userId
 │   │   ├── neighborhood.ts             # /v1/neighborhoods/*
 │   │   ├── leftovers.ts                # /v1/leftovers/*
 │   │   ├── chat.ts                     # /v1/chats/*
@@ -70,7 +72,9 @@ This backend implements the full MVP specification with the following Cloudflare
 │   │   ├── auth.test.ts
 │   │   ├── cleanify.test.ts
 │   │   ├── contact.test.ts
+│   │   ├── contact-verification.test.ts
 │   │   ├── leftovers.test.ts
+│   │   ├── user.test.ts
 │   │   └── verification.test.ts
 │   ├── queues/
 │   │   ├── campaign.test.ts
@@ -88,6 +92,19 @@ This backend implements the full MVP specification with the following Cloudflare
 └── vitest.config.ts
 ```
 
+## Auth Flow
+
+New users go through three sequential steps before getting full API access:
+
+```
+Signup
+  └─→ Contact Verification (OTP via email or SMS)
+        └─→ Identity Verification (KYC via Gemini Vision AI)
+              └─→ Full JWT issued on login
+```
+
+> **Token scopes:** Signup issues a `restricted_token` with scope `verification_only`. This token is valid only for `/v1/auth/verify/*` and `/v1/verification/*` routes. A full-access token is only issued on login after both contact verification and KYC are complete.
+
 ## Middleware
 
 All protected routes pass through the following middleware pipeline, defined in `src/middleware/auth.ts`:
@@ -103,19 +120,30 @@ All protected routes pass through the following middleware pipeline, defined in 
 
 Rate limiting is handled via `src/lib/rate-limit.ts` using KV counters and applied at the route level.
 
-> **Auth flow note:** On signup, a `restricted_token` with scope `verification_only` is issued. This token only grants access to `/v1/verification/*` endpoints. Full API access requires completing KYC and receiving a standard JWT.
-
 ## API Endpoints
 
 ### Authentication
 
-- `POST /v1/auth/signup` - Create account. Returns `restricted_token` + `verification_session_id`. No full API access until KYC is complete.
-- `POST /v1/auth/login` - Login (requires `verified` status).
+- `POST /v1/auth/signup` - Create account. Returns `restricted_token` + `verification_session_id` + `contact_verification_required: true`. No full API access until contact verification and KYC are both complete.
+- `POST /v1/auth/login` - Login. Requires contact verified AND KYC verified status.
 - `POST /v1/auth/refresh` - Refresh access and refresh tokens.
+
+### Contact Verification (OTP)
+
+Must be completed **before** KYC. Uses the `restricted_token` from signup.
+OTPs are 6 digits, expire in 10 minutes, hashed with SHA-256.
+
+**Rate limits:** max 3 sends per hour, max 5 wrong guesses before 60-minute lockout.
+
+- `POST /v1/auth/verify/email/send` - Send a 6-digit OTP to the user's registered email via Resend.
+- `POST /v1/auth/verify/email/confirm` - Confirm the email OTP. Sets `email_verified = true`.
+- `POST /v1/auth/verify/phone/send` - Send a 6-digit OTP to the user's registered phone via Twilio SMS.
+- `POST /v1/auth/verify/phone/confirm` - Confirm the phone OTP. Sets `phone_verified = true`.
+- `GET /v1/auth/verify/status` - Returns current contact verification state (email/phone masked in response).
 
 ### Identity Verification (KYC)
 
-New users must complete this flow before any protected endpoint is accessible.
+Must be completed **after** contact verification. Uses the `restricted_token` from signup.
 
 - `POST /v1/verification/start` - Open or reuse a verification session.
 - `POST /v1/verification/presigned-url` - Get R2 upload URL for one document (`front`, `back`, `selfie`).
@@ -170,11 +198,11 @@ New users must complete this flow before any protected endpoint is accessible.
 - `POST /v1/cleanify/submissions/:id/reject` - Reject with a required note. **Moderator only.**
 - `GET /v1/cleanify/stats` - Submission statistics for the user's neighborhood and themselves.
 
-Submissions are automatically reviewed by Gemini Vision AI, which checks that both photos show the same location with a visible improvement in cleanliness. Moderator `approve`/`reject` endpoints remain available as manual overrides for disputed or edge-case submissions.
+Submissions are automatically reviewed by Gemini Vision AI, which checks that both photos show the same location with a visible improvement in cleanliness. Moderator `approve`/`reject` endpoints remain available as manual overrides.
 
-### Contact
+### Contact (Public)
 
-Public website forms - no authentication required. Rate limited to 5 submissions per IP per hour.
+No authentication required. Rate limited to 5 submissions per IP per hour.
 
 - `POST /v1/contact` - Submit a citizen or partner form. Payload is a discriminated union on `type`:
   - **`citizen`** - requires `name`, `email`, `topic` (`account | bug | feedback | other`), `message`
@@ -209,6 +237,8 @@ Public website forms - no authentication required. Rate limited to 5 submissions
 - Node.js 18+
 - Wrangler CLI: `npm install -g wrangler`
 - Cloudflare account
+- Resend account (email OTP delivery)
+- Twilio account (SMS OTP delivery)
 
 ### Setup
 
@@ -217,6 +247,24 @@ npm install
 ```
 
 ### Local Development
+
+Create a `.dev.vars` file in the project root (never commit this):
+
+```
+JWT_SECRET=your-local-secret
+FCM_SERVER_KEY=your-fcm-key
+GEMINI_API_KEY=your-gemini-key
+INTERNAL_WEBHOOK_SECRET=your-internal-secret
+RESEND_API_KEY=re_xxxxxxxxxxxx
+RESEND_FROM_EMAIL=Wihda <onboarding@resend.dev>
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_PHONE_NUMBER=+1XXXXXXXXXX
+```
+
+> **Resend sandbox:** Use `onboarding@resend.dev` as the sender until your domain is verified in Resend. Sandbox can only deliver to the email you signed up with.
+
+> **Twilio trial:** Can only send SMS to verified caller IDs (the number you verified when signing up).
 
 ```bash
 # Start local development server
@@ -280,23 +328,39 @@ wrangler secret put JWT_SECRET
 wrangler secret put FCM_SERVER_KEY
 wrangler secret put GEMINI_API_KEY
 wrangler secret put INTERNAL_WEBHOOK_SECRET
+wrangler secret put RESEND_API_KEY
+wrangler secret put TWILIO_ACCOUNT_SID
+wrangler secret put TWILIO_AUTH_TOKEN
 ```
 
 ## Environment Variables
 
-| Variable                  | Description                                                                    |
-| ------------------------- | ------------------------------------------------------------------------------ |
-| `ENVIRONMENT`             | `development` / `staging` / `production`                                       |
-| `JWT_SECRET`              | Secret used for JWT signing and verification                                   |
-| `FCM_SERVER_KEY`          | Firebase Cloud Messaging server key                                            |
-| `GEMINI_API_KEY`          | Google Gemini API key (used for KYC document review)                           |
-| `INTERNAL_WEBHOOK_SECRET` | Shared secret between the verification queue consumer and the webhook endpoint |
+| Variable                  | Description                                                                             |
+| ------------------------- | --------------------------------------------------------------------------------------- |
+| `ENVIRONMENT`             | `development` / `staging` / `production`                                                |
+| `JWT_SECRET`              | Secret used for JWT signing and verification                                            |
+| `FCM_SERVER_KEY`          | Firebase Cloud Messaging server key                                                     |
+| `GEMINI_API_KEY`          | Google Gemini API key (used for KYC document and Cleanify photo review)                 |
+| `INTERNAL_WEBHOOK_SECRET` | Shared secret between the verification queue consumer and the internal webhook endpoint |
+| `RESEND_API_KEY`          | Resend API key for email OTP delivery                                                   |
+| `RESEND_FROM_EMAIL`       | Sender address shown in OTP emails (e.g. `Wihda <noreply@wihda.app>`)                   |
+| `TWILIO_ACCOUNT_SID`      | Twilio Account SID for SMS OTP delivery                                                 |
+| `TWILIO_AUTH_TOKEN`       | Twilio Auth Token                                                                       |
+| `TWILIO_PHONE_NUMBER`     | Twilio sender number in E.164 format (e.g. `+12015551234`)                              |
 
 ## Key Design Notes
 
+### Auth & Verification Pipeline
+
+Users progress through three gates before receiving full API access. Each gate must be passed in order: contact verification (OTP) -> identity verification (KYC) -> active account. The `restricted_token` issued at signup has scope `verification_only` and cannot be refreshed or used for any other endpoint.
+
+### OTP Security
+
+6-digit codes are generated using `crypto.getRandomValues`. The plaintext code is never stored - only its SHA-256 hash is written to `contact_verifications`. Codes expire after 10 minutes. After 5 consecutive wrong guesses the record is locked for 60 minutes. Resend is rate-limited to 3 codes per hour per channel per user.
+
 ### Idempotency
 
-Coin awards use a unique constraint on `(source_type, source_id, user_id)`. Match closures are idempotent via status checks. This prevents duplicate rewards across retries or race conditions.
+Coin awards use a unique constraint on `(source_type, source_id, user_id)`. Match closures are idempotent via status checks. Contact verification confirm writes are batched (D1 `batch()`) to atomically update both the verification record and the user row.
 
 ### Matching Algorithm
 

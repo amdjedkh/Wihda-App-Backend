@@ -26,6 +26,15 @@ export interface Env {
   /** Shared secret that the verification queue consumer uses to authenticate
    *  to the internal webhook endpoint. Set via: wrangler secret put INTERNAL_WEBHOOK_SECRET */
   INTERNAL_WEBHOOK_SECRET: string;
+
+  // ── Resend — email OTP delivery ───────────────────────────────────────────
+  RESEND_API_KEY: string;
+  RESEND_FROM_EMAIL: string;
+
+  // ── Twilio — SMS OTP delivery ─────────────────────────────────────────────
+  TWILIO_ACCOUNT_SID: string;
+  TWILIO_AUTH_TOKEN: string;
+  TWILIO_PHONE_NUMBER: string;
 }
 
 // ============================================
@@ -51,6 +60,10 @@ export interface User {
   verification_status: VerificationStatus;
   language_preference: string;
   fcm_token: string | null;
+  /** 0 | 1 — SQLite boolean; true when the user confirmed their email OTP */
+  email_verified: number;
+  /** 0 | 1 — SQLite boolean; true when the user confirmed their phone OTP */
+  phone_verified: number;
   created_at: string;
   updated_at: string;
 }
@@ -68,7 +81,7 @@ export interface UserWithNeighborhood extends User {
 }
 
 // ============================================
-// Verification Types
+// Verification Types (KYC)
 // ============================================
 
 export type VerificationSessionStatus =
@@ -106,6 +119,34 @@ export interface PresignedUrlResponse {
   upload_url: string;
   file_key: string;
   expires_at: string;
+}
+
+// ============================================
+// Contact Verification Types (OTP)
+// ============================================
+
+export type ContactVerificationChannel = "email" | "phone";
+
+export interface ContactVerification {
+  id: string;
+  user_id: string;
+  channel: ContactVerificationChannel;
+  /** The actual email address or phone number the OTP was sent to */
+  target: string;
+  /** SHA-256 hex hash of the 6-digit code — never stored in plaintext */
+  code_hash: string;
+  expires_at: string;
+  /** Number of wrong guesses so far */
+  attempts: number;
+  /** Set to ISO timestamp on successful verification; null otherwise */
+  verified_at: string | null;
+  /** How many times a code has been sent within the current 1-hour window */
+  send_count: number;
+  last_sent_at: string;
+  /** Non-null while the record is locked due to too many wrong attempts */
+  locked_until: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ============================================
@@ -571,6 +612,10 @@ export interface SignupResponse {
   restricted_token: string;
   expires_in: number;
   user: { id: string; display_name: string };
+  /** Always true — client must complete OTP verification before KYC */
+  contact_verification_required: boolean;
+  /** Which channel the client should prompt the user to verify first */
+  contact_channel: ContactVerificationChannel;
 }
 
 export interface LoginResponse {

@@ -56,9 +56,12 @@ const loginSchema = z
 /**
  * Creates a new user account in 'unverified' state.
  *
- * Returns a RESTRICTED token (scope: 'verification_only') + a verification
- * session ID. The client must complete the KYC flow at /v1/verification/*
- * before a full-access token is issued on login.
+ * Returns a RESTRICTED token (scope: 'verification_only') that the client
+ * must use to:
+ *   1. Verify their contact info  → POST /v1/auth/verify/{email|phone}/send + confirm
+ *   2. Complete KYC               → POST /v1/verification/start … submit
+ *
+ * Full API access is only granted after both steps are complete.
  */
 auth.post("/signup", async (c) => {
   try {
@@ -98,6 +101,7 @@ auth.post("/signup", async (c) => {
     const passwordHash = await hashPassword(data.password);
 
     // User is created with verification_status = 'unverified' (DB default)
+    // email_verified / phone_verified both default to 0 (DB default)
     const user = await createUser(c.env.DB, {
       email: data.email,
       phone: data.phone,
@@ -108,7 +112,7 @@ auth.post("/signup", async (c) => {
 
     const session = await createVerificationSession(c.env.DB, user.id);
 
-    // Restricted token — only valid for /v1/verification/* routes
+    // Restricted token — only valid for /v1/verification/* and /v1/auth/verify/* routes
     const restrictedToken = await createJWT(
       {
         sub: user.id,
@@ -121,11 +125,16 @@ auth.post("/signup", async (c) => {
       24,
     );
 
+    // Tell the client which channel to verify first
+    const contactChannel: "email" | "phone" = data.email ? "email" : "phone";
+
     const response: SignupResponse = {
       verification_session_id: session.id,
       restricted_token: restrictedToken,
       expires_in: 86400,
       user: { id: user.id, display_name: user.display_name },
+      contact_verification_required: true,
+      contact_channel: contactChannel,
     };
 
     return successResponse(response, 201);
@@ -176,6 +185,28 @@ auth.post("/login", async (c) => {
         "Your account has been temporarily suspended",
         403,
       );
+
+    // ── Contact verification gate ─────────────────────────────────────────────
+    // The user must have verified at least the contact method they signed up with.
+    const hasVerifiedContact =
+      (user.email !== null && user.email_verified === 1) ||
+      (user.phone !== null && user.phone_verified === 1);
+
+    if (!hasVerifiedContact) {
+      const channel = user.email ? "email" : "phone";
+      return c.json(
+        {
+          success: false,
+          error: {
+            code: "CONTACT_VERIFICATION_REQUIRED",
+            message:
+              "Please verify your email or phone number before logging in.",
+            details: { contact_channel: channel },
+          },
+        },
+        403,
+      );
+    }
 
     // ── KYC gate ──────────────────────────────────────────────────────────────
     if (user.verification_status !== "verified") {
@@ -274,7 +305,20 @@ auth.post("/refresh", async (c) => {
     const user = await getUserById(c.env.DB, payload.sub);
     if (!user) return errorResponse("USER_NOT_FOUND", "User not found", 404);
 
-    // Re-check verification in case an admin revoked it since last login
+    // Re-check contact verification in case something changed
+    const hasVerifiedContact =
+      (user.email !== null && user.email_verified === 1) ||
+      (user.phone !== null && user.phone_verified === 1);
+
+    if (!hasVerifiedContact) {
+      return errorResponse(
+        "CONTACT_VERIFICATION_REQUIRED",
+        "Contact verification is required",
+        403,
+      );
+    }
+
+    // Re-check KYC in case an admin revoked it since last login
     if (user.verification_status !== "verified") {
       return errorResponse(
         "VERIFICATION_REQUIRED",

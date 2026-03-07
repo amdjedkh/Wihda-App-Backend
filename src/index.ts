@@ -11,6 +11,7 @@ import type {
   CampaignQueueMessage,
   NotificationQueueMessage,
   VerificationQueueMessage,
+  CleanifyQueueMessage,
 } from "./types";
 
 // Import routes
@@ -36,6 +37,7 @@ import {
   markNotificationsRead,
 } from "./queues/notification";
 import { handleVerificationQueue } from "./queues/verification";
+import { handleCleanifyQueue } from "./queues/cleanify";
 
 // Import Durable Object
 import { ChatThreadDurableObject } from "./durable-objects/ChatThreadDurableObject";
@@ -228,6 +230,12 @@ export default {
       case "wihda-verification-queue":
         await handleVerificationQueue(
           batch as MessageBatch<VerificationQueueMessage>,
+          env,
+        );
+        break;
+      case "wihda-cleanify-queue":
+        await handleCleanifyQueue(
+          batch as MessageBatch<CleanifyQueueMessage>,
           env,
         );
         break;

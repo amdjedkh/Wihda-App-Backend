@@ -377,17 +377,16 @@ describe("Cleanify Routes", () => {
   // ── POST /:id/after/confirm ──────────────────────────────────────────────────
 
   describe("POST /:id/after/confirm", () => {
-    it("confirms after photo and transitions to pending_review", async () => {
+    it("confirms after photo, transitions to pending_review, and enqueues AI review", async () => {
       const sub = makeSub({
         status: "in_progress",
         before_uploaded_at: T_30_MIN_AGO,
+        before_photo_key: "cleanify/user-003/sub-001/before.jpg",
+        neighborhood_id: "nb-001",
       });
-      const updated = makeSub({ status: "pending_review" });
       mockEnv.DB.prepare
-        .mockReturnValueOnce(stmt(sub)) // fetch
-        .mockReturnValueOnce(stmt()) // UPDATE
-        .mockReturnValueOnce(stmt()) // notification queue (run)
-        .mockReturnValueOnce(stmt(updated)); // fetch updated
+        .mockReturnValueOnce(stmt(sub)) // getCleanifySubmissionById
+        .mockReturnValueOnce(stmt()); // UPDATE → pending_review
 
       const res = await cleanify.fetch(
         req("/sub-001/after/confirm", {
@@ -402,6 +401,20 @@ describe("Cleanify Routes", () => {
 
       expect(res.status).toBe(200);
       expect(data.data.status).toBe("pending_review");
+      expect(data.data.submission_id).toBe("sub-001");
+
+      // AI review must be enqueued — NOT the old mod notification
+      expect(mockEnv.CLEANIFY_QUEUE.send).toHaveBeenCalledOnce();
+      expect(mockEnv.CLEANIFY_QUEUE.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "run_ai_check",
+          submission_id: "sub-001",
+          user_id: "user-003",
+          neighborhood_id: "nb-001",
+        }),
+      );
+      // Old mod notification queue must NOT be called for this
+      expect(mockEnv.NOTIFICATION_QUEUE.send).not.toHaveBeenCalled();
     });
 
     it("requires file_key in body", async () => {

@@ -50,6 +50,10 @@ binding = "NOTIFICATION_QUEUE"
 queue = "wihda-verification-queue"
 binding = "VERIFICATION_QUEUE"
 
+[[queues.producers]]
+queue = "wihda-cleanify-queue"
+binding = "CLEANIFY_QUEUE"
+
 # Queue consumers
 [[queues.consumers]]
 queue = "wihda-matching-queue"
@@ -75,6 +79,11 @@ max_batch_size = 5
 max_batch_timeout = 30
 max_retries = 3
 dead_letter_queue = "wihda-verification-dlq"
+
+[[queues.consumers]]
+queue = "wihda-cleanify-queue"
+max_batch_size = 10
+max_retries = 3
 
 # Durable Objects for Chat
 [[durable_objects.bindings]]

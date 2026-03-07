@@ -492,6 +492,32 @@ export interface CleanifyQueueMessage {
 }
 
 // ============================================
+// Contact Form Types
+// ============================================
+
+export type ContactSubmissionStatus = "new" | "read" | "resolved";
+export type ContactTopic = "account" | "bug" | "feedback" | "other";
+export type ContactType = "citizen" | "partner";
+
+export interface ContactSubmission {
+  id: string;
+  type: ContactType;
+  // citizen
+  name: string | null;
+  email: string;
+  topic: ContactTopic | null;
+  message: string | null;
+  // partner
+  organization: string | null;
+  contact_person: string | null;
+  proposal: string | null;
+  // meta
+  ip_address: string | null;
+  status: ContactSubmissionStatus;
+  created_at: string;
+}
+
+// ============================================
 // JWT & API Types
 // ============================================
 

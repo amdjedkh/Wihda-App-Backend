@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS cleanify_submissions (
 );
 
 -- Re-create indexes
-CREATE INDEX idx_cleanify_user        ON cleanify_submissions(user_id);
-CREATE INDEX idx_cleanify_neighborhood ON cleanify_submissions(neighborhood_id);
-CREATE INDEX idx_cleanify_status      ON cleanify_submissions(status);
-CREATE INDEX idx_cleanify_submitted   ON cleanify_submissions(created_at);
+CREATE INDEX IF NOT EXISTS idx_cleanify_user         ON cleanify_submissions(user_id);
+CREATE INDEX IF NOT EXISTS idx_cleanify_neighborhood  ON cleanify_submissions(neighborhood_id);
+CREATE INDEX IF NOT EXISTS idx_cleanify_status        ON cleanify_submissions(status);
+CREATE INDEX IF NOT EXISTS idx_cleanify_submitted     ON cleanify_submissions(created_at);

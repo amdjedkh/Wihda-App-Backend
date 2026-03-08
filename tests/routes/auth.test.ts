@@ -37,6 +37,8 @@ const VERIFIED_USER = {
   status: "active",
   verification_status: "verified",
   language_preference: "fr",
+  email_verified: 1,
+  phone_verified: 0,
   created_at: "2024-01-01T00:00:00Z",
   updated_at: "2024-01-01T00:00:00Z",
 };

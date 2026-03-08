@@ -30,6 +30,7 @@ export const testUsers: User[] = [
     status: "active",
     verification_status: "verified",
     language_preference: "fr",
+    fcm_token: null,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
   },
@@ -43,6 +44,7 @@ export const testUsers: User[] = [
     status: "active",
     verification_status: "verified",
     language_preference: "fr",
+    fcm_token: null,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
   },
@@ -56,6 +58,7 @@ export const testUsers: User[] = [
     status: "active",
     verification_status: "verified",
     language_preference: "fr",
+    fcm_token: null,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
   },
@@ -69,6 +72,7 @@ export const testUsers: User[] = [
     status: "active",
     verification_status: "verified",
     language_preference: "fr",
+    fcm_token: null,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
   },
@@ -119,7 +123,10 @@ export const testOffers: LeftoverOffer[] = [
       distance_willing_km: 2,
       notes: "Préparé aujourd'hui",
     }),
+    schema_version: 1,
     quantity: 1,
+    pickup_window_start: null,
+    pickup_window_end: null,
     status: "active",
     expiry_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     created_at: "2024-01-15T10:00:00Z",
@@ -142,6 +149,7 @@ export const testNeeds: LeftoverNeed[] = [
       pickup_time_preference: "evening",
       distance_willing_km: 3,
     }),
+    schema_version: 1,
     urgency: "normal",
     status: "active",
     created_at: "2024-01-15T11:00:00Z",
@@ -156,10 +164,23 @@ export const testMatches: Match[] = [
     id: "match-001",
     offer_id: "offer-001",
     need_id: "need-001",
-    giver_user_id: "user-003",
-    receiver_user_id: "user-004",
+    // Field names mirror the DB schema and route code (offer_user_id / need_user_id).
+    // Previously these were incorrectly named giver_user_id / receiver_user_id which
+    // caused the close-match handler to never find the current user as a participant.
+    offer_user_id: "user-003",
+    need_user_id: "user-004",
+    neighborhood_id: "nb-001",
     score: 0.85,
+    match_reason: JSON.stringify([
+      "Food type matches",
+      "All dietary requirements satisfied",
+    ]),
     status: "active",
+    closure_type: null,
+    closed_by: null,
+    dispute_reason: null,
+    coins_awarded: 0,
+    closed_at: null,
     created_at: "2024-01-15T12:00:00Z",
     updated_at: "2024-01-15T12:00:00Z",
   },
@@ -171,7 +192,11 @@ export const testChatThreads: ChatThread[] = [
   {
     id: "thread-001",
     match_id: "match-001",
+    neighborhood_id: "nb-001",
+    participant_1_id: "user-003",
+    participant_2_id: "user-004",
     status: "active",
+    last_message_at: null,
     created_at: "2024-01-15T12:00:00Z",
     updated_at: "2024-01-15T12:00:00Z",
   },
@@ -184,6 +209,9 @@ export const testChatMessages: ChatMessage[] = [
     sender_id: "user-003",
     body: "Hi! The couscous is ready for pickup.",
     message_type: "text",
+    media_url: null,
+    metadata: null,
+    deleted_at: null,
     created_at: "2024-01-15T12:05:00Z",
   },
 ];
@@ -228,9 +256,15 @@ export const testCampaigns: Campaign[] = [
     description: "Opération de nettoyage communautaire",
     organizer: "Association Bab El Oued",
     location: "Place Bab El Oued",
+    location_geo_lat: null,
+    location_geo_lng: null,
     start_dt: "2024-02-15T09:00:00Z",
     end_dt: "2024-02-15T12:00:00Z",
+    url: null,
+    image_url: null,
     source: "manual",
+    source_identifier: null,
+    status: null,
     last_seen_at: "2024-01-15T00:00:00Z",
     created_at: "2024-01-10T00:00:00Z",
     updated_at: "2024-01-10T00:00:00Z",
@@ -243,29 +277,26 @@ export const testCoinEntries: CoinLedgerEntry[] = [
   {
     id: "coin-001",
     user_id: "user-003",
+    neighborhood_id: "nb-001",
     source_type: "signup_bonus",
     source_id: "signup-001",
     amount: 50,
     category: "bonus",
     description: "Welcome bonus for joining Wihda",
     status: "valid",
+    created_by: null,
     created_at: "2024-01-01T00:00:00Z",
   },
 ];
 
 // ─── Mock D1 Database ─────────────────────────────────────────────────────────
+//
+// IMPORTANT: All prepare() calls return the SAME shared statement object so
+// that tests can mock individual methods via `mockEnv.DB.first`, `mockEnv.DB.all`,
+// and `mockEnv.DB.run` directly.  Previously each prepare() call returned a new
+// statement instance, making those properties unreachable on the db object itself.
 
 export function createMockD1Database() {
-  const db = {
-    prepare: vi.fn(() => createMockStatement()),
-    batch: vi.fn().mockResolvedValue([]),
-    exec: vi.fn().mockResolvedValue({ count: 0, duration: 0 }),
-    dump: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
-  };
-  return db;
-}
-
-function createMockStatement() {
   const stmt = {
     bind: vi.fn().mockReturnThis(),
     first: vi.fn().mockResolvedValue(null),
@@ -273,7 +304,19 @@ function createMockStatement() {
     run: vi.fn().mockResolvedValue({ success: true, meta: {} }),
     raw: vi.fn().mockResolvedValue([]),
   };
-  return stmt;
+
+  const db = {
+    prepare: vi.fn().mockReturnValue(stmt),
+    batch: vi.fn().mockResolvedValue([]),
+    exec: vi.fn().mockResolvedValue({ count: 0, duration: 0 }),
+    dump: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+    // Expose statement methods directly so tests can mock them with
+    // mockEnv.DB.first.mockResolvedValueOnce(...) etc.
+    first: stmt.first,
+    all: stmt.all,
+    run: stmt.run,
+  };
+  return db;
 }
 
 // ─── Mock R2 Bucket ───────────────────────────────────────────────────────────
@@ -323,6 +366,12 @@ export function createMockEnv() {
     GEMINI_API_KEY: "test-gemini-api-key",
     INTERNAL_WEBHOOK_SECRET: "test-internal-secret",
     ENVIRONMENT: "test",
+
+    RESEND_API_KEY: "test-resend-key",
+    RESEND_FROM_EMAIL: "noreply@test.wihda.dz",
+    TWILIO_ACCOUNT_SID: "test-twilio-sid",
+    TWILIO_AUTH_TOKEN: "test-twilio-token",
+    TWILIO_PHONE_NUMBER: "+10000000000",
 
     MATCHING_QUEUE: createMockQueue(),
     NOTIFICATION_QUEUE: createMockQueue(),

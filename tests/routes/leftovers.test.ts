@@ -2,29 +2,38 @@
  * Tests for Leftovers Routes
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import leftovers from '../../src/routes/leftovers';
-import { createMockEnv, testUsers, testOffers, testNeeds, testMatches } from '../fixtures';
-import { hashPassword, createJWT } from '../../src/lib/utils';
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import leftovers from "../../src/routes/leftovers";
+import {
+  createMockEnv,
+  testUsers,
+  testOffers,
+  testNeeds,
+  testMatches,
+} from "../fixtures";
+import { hashPassword, createJWT } from "../../src/lib/utils";
 
 // Helper to create test request
-function createRequest(path: string, options: {
-  method?: string;
-  body?: unknown;
-  headers?: Record<string, string>;
-} = {}) {
+function createRequest(
+  path: string,
+  options: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  } = {},
+) {
   const url = `http://localhost:8787${path}`;
   return new Request(url, {
-    method: options.method || 'GET',
+    method: options.method || "GET",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...options.headers,
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 }
 
-describe('Leftovers Routes', () => {
+describe("Leftovers Routes", () => {
   let mockEnv: ReturnType<typeof createMockEnv>;
   let accessToken: string;
 
@@ -32,32 +41,32 @@ describe('Leftovers Routes', () => {
     vi.clearAllMocks();
     mockEnv = createMockEnv();
     accessToken = await createJWT(
-      { sub: 'user-003', role: 'user', neighborhood_id: 'nb-001' },
+      { sub: "user-003", role: "user", neighborhood_id: "nb-001" },
       mockEnv.JWT_SECRET,
-      24
+      24,
     );
   });
 
-  describe('POST /offers', () => {
-    it('should create a new leftover offer', async () => {
+  describe("POST /offers", () => {
+    it("should create a new leftover offer", async () => {
       mockEnv.DB.first.mockResolvedValueOnce({
-        id: 'un-001',
-        neighborhood_id: 'nb-001',
+        id: "un-001",
+        neighborhood_id: "nb-001",
       }); // getUserNeighborhood
       mockEnv.DB.run.mockResolvedValue({ success: true });
       mockEnv.DB.first.mockResolvedValue(testOffers[0]);
 
-      const req = createRequest('/offers', {
-        method: 'POST',
+      const req = createRequest("/offers", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
-          title: 'Homemade Couscous',
-          description: 'Fresh couscous for 4 people',
+          title: "Homemade Couscous",
+          description: "Fresh couscous for 4 people",
           survey: {
-            food_type: 'cooked_meal',
-            diet_constraints: ['halal'],
+            food_type: "cooked_meal",
+            diet_constraints: ["halal"],
             portions: 4,
-            pickup_time_preference: 'evening',
+            pickup_time_preference: "evening",
             distance_willing_km: 3,
           },
           quantity: 1,
@@ -72,25 +81,25 @@ describe('Leftovers Routes', () => {
       expect((data as any).success).toBe(true);
     });
 
-    it('should reject offer creation without neighborhood', async () => {
+    it("should reject offer creation without neighborhood", async () => {
       mockEnv.DB.first.mockResolvedValueOnce(null); // No neighborhood
 
       const token = await createJWT(
-        { sub: 'user-003', role: 'user', neighborhood_id: null },
+        { sub: "user-003", role: "user", neighborhood_id: null },
         mockEnv.JWT_SECRET,
-        24
+        24,
       );
 
-      const req = createRequest('/offers', {
-        method: 'POST',
+      const req = createRequest("/offers", {
+        method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: {
-          title: 'Test Offer',
+          title: "Test Offer",
           survey: {
-            food_type: 'cooked_meal',
+            food_type: "cooked_meal",
             diet_constraints: [],
             portions: 2,
-            pickup_time_preference: 'evening',
+            pickup_time_preference: "evening",
             distance_willing_km: 3,
           },
         },
@@ -100,13 +109,13 @@ describe('Leftovers Routes', () => {
       const data = await res.json();
 
       expect(res.status).toBe(400);
-      expect((data as any).error.code).toBe('NO_NEIGHBORHOOD');
+      expect((data as any).error.code).toBe("NEIGHBORHOOD_REQUIRED");
     });
 
-    it('should reject unauthenticated request', async () => {
-      const req = createRequest('/offers', {
-        method: 'POST',
-        body: { title: 'Test' },
+    it("should reject unauthenticated request", async () => {
+      const req = createRequest("/offers", {
+        method: "POST",
+        body: { title: "Test" },
       });
 
       const res = await leftovers.fetch(req, mockEnv, {} as any);
@@ -114,12 +123,12 @@ describe('Leftovers Routes', () => {
     });
   });
 
-  describe('GET /offers', () => {
-    it('should return list of offers', async () => {
-      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: 'nb-001' });
+  describe("GET /offers", () => {
+    it("should return list of offers", async () => {
+      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: "nb-001" });
       mockEnv.DB.all.mockResolvedValue({ results: testOffers });
 
-      const req = createRequest('/offers', {
+      const req = createRequest("/offers", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
@@ -131,11 +140,13 @@ describe('Leftovers Routes', () => {
       expect((data as any).data.offers).toBeDefined();
     });
 
-    it('should filter by status', async () => {
-      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: 'nb-001' });
-      mockEnv.DB.all.mockResolvedValue({ results: testOffers.filter(o => o.status === 'active') });
+    it("should filter by status", async () => {
+      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: "nb-001" });
+      mockEnv.DB.all.mockResolvedValue({
+        results: testOffers.filter((o) => o.status === "active"),
+      });
 
-      const req = createRequest('/offers?status=active', {
+      const req = createRequest("/offers?status=active", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
@@ -144,24 +155,24 @@ describe('Leftovers Routes', () => {
     });
   });
 
-  describe('POST /needs', () => {
-    it('should create a new leftover need', async () => {
-      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: 'nb-001' });
+  describe("POST /needs", () => {
+    it("should create a new leftover need", async () => {
+      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: "nb-001" });
       mockEnv.DB.run.mockResolvedValue({ success: true });
       mockEnv.DB.first.mockResolvedValue(testNeeds[0]);
 
-      const req = createRequest('/needs', {
-        method: 'POST',
+      const req = createRequest("/needs", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
           survey: {
-            food_type: 'cooked_meal',
-            diet_constraints: ['halal'],
+            food_type: "cooked_meal",
+            diet_constraints: ["halal"],
             portions: 2,
-            pickup_time_preference: 'evening',
+            pickup_time_preference: "evening",
             distance_willing_km: 3,
           },
-          urgency: 'normal',
+          urgency: "normal",
         },
       });
 
@@ -173,12 +184,12 @@ describe('Leftovers Routes', () => {
     });
   });
 
-  describe('GET /needs', () => {
-    it('should return list of needs', async () => {
-      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: 'nb-001' });
+  describe("GET /needs", () => {
+    it("should return list of needs", async () => {
+      mockEnv.DB.first.mockResolvedValueOnce({ neighborhood_id: "nb-001" });
       mockEnv.DB.all.mockResolvedValue({ results: testNeeds });
 
-      const req = createRequest('/needs', {
+      const req = createRequest("/needs", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
@@ -191,11 +202,11 @@ describe('Leftovers Routes', () => {
     });
   });
 
-  describe('GET /matches', () => {
-    it('should return user matches', async () => {
+  describe("GET /matches", () => {
+    it("should return user matches", async () => {
       mockEnv.DB.all.mockResolvedValue({ results: testMatches });
 
-      const req = createRequest('/matches', {
+      const req = createRequest("/matches", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
@@ -208,27 +219,27 @@ describe('Leftovers Routes', () => {
     });
   });
 
-  describe('POST /matches/:id/close', () => {
-    it('should close a match as successful', async () => {
+  describe("POST /matches/:id/close", () => {
+    it("should close a match as successful", async () => {
       mockEnv.DB.first.mockResolvedValueOnce({
         ...testMatches[0],
-        offer_user_id: 'user-003',
-        need_user_id: 'user-004',
+        offer_user_id: "user-003",
+        need_user_id: "user-004",
       });
       mockEnv.DB.run.mockResolvedValue({ success: true });
       mockEnv.DB.first.mockResolvedValue({
         ...testMatches[0],
-        offer_user_id: 'user-003',
-        need_user_id: 'user-004',
-        status: 'closed',
-        closure_type: 'successful',
+        offer_user_id: "user-003",
+        need_user_id: "user-004",
+        status: "closed",
+        closure_type: "successful",
       });
 
-      const req = createRequest('/matches/match-001/close', {
-        method: 'POST',
+      const req = createRequest("/matches/match-001/close", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
-          closure_type: 'successful',
+          closure_type: "successful",
         },
       });
 
@@ -239,19 +250,19 @@ describe('Leftovers Routes', () => {
       expect((data as any).success).toBe(true);
     });
 
-    it('should close a match as cancelled', async () => {
+    it("should close a match as cancelled", async () => {
       mockEnv.DB.first.mockResolvedValue({
         ...testMatches[0],
-        offer_user_id: 'user-003',
-        need_user_id: 'user-004',
+        offer_user_id: "user-003",
+        need_user_id: "user-004",
       });
       mockEnv.DB.run.mockResolvedValue({ success: true });
 
-      const req = createRequest('/matches/match-001/close', {
-        method: 'POST',
+      const req = createRequest("/matches/match-001/close", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
-          closure_type: 'cancelled',
+          closure_type: "cancelled",
         },
       });
 
@@ -259,14 +270,14 @@ describe('Leftovers Routes', () => {
       expect(res.status).toBe(200);
     });
 
-    it('should reject closing non-existent match', async () => {
+    it("should reject closing non-existent match", async () => {
       mockEnv.DB.first.mockResolvedValue(null);
 
-      const req = createRequest('/matches/nonexistent/close', {
-        method: 'POST',
+      const req = createRequest("/matches/nonexistent/close", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
-          closure_type: 'successful',
+          closure_type: "successful",
         },
       });
 
@@ -274,21 +285,21 @@ describe('Leftovers Routes', () => {
       const data = await res.json();
 
       expect(res.status).toBe(404);
-      expect((data as any).error.code).toBe('NOT_FOUND');
+      expect((data as any).error.code).toBe("NOT_FOUND");
     });
 
-    it('should reject closing by non-participant', async () => {
+    it("should reject closing by non-participant", async () => {
       mockEnv.DB.first.mockResolvedValue({
         ...testMatches[0],
-        offer_user_id: 'user-001',
-        need_user_id: 'user-002',
+        offer_user_id: "user-001",
+        need_user_id: "user-002",
       });
 
-      const req = createRequest('/matches/match-001/close', {
-        method: 'POST',
+      const req = createRequest("/matches/match-001/close", {
+        method: "POST",
         headers: { Authorization: `Bearer ${accessToken}` },
         body: {
-          closure_type: 'successful',
+          closure_type: "successful",
         },
       });
 
@@ -296,7 +307,7 @@ describe('Leftovers Routes', () => {
       const data = await res.json();
 
       expect(res.status).toBe(403);
-      expect((data as any).error.code).toBe('FORBIDDEN');
+      expect((data as any).error.code).toBe("FORBIDDEN");
     });
   });
 });

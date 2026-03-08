@@ -312,6 +312,9 @@ export function createMockD1Database() {
     dump: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
     // Expose statement methods directly so tests can mock them with
     // mockEnv.DB.first.mockResolvedValueOnce(...) etc.
+    // bind is also exposed so tests can assert on query arguments:
+    // expect(mockEnv.DB.bind).toHaveBeenCalledWith(...)
+    bind: stmt.bind,
     first: stmt.first,
     all: stmt.all,
     run: stmt.run,

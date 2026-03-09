@@ -31,14 +31,11 @@ import {
   handleCampaignQueue,
   handleScheduledCampaignIngestion,
 } from "./queues/campaign";
-import {
-  handleNotificationQueue,
-  getNotificationHistory,
-  markNotificationsRead,
-} from "./queues/notification";
+import { handleNotificationQueue } from "./queues/notification";
 import { handleVerificationQueue } from "./queues/verification";
 import { handleCleanifyQueue } from "./queues/cleanify";
 import contactRoutes from "./routes/contact";
+import notificationRoutes from "./routes/notifications";
 
 // Import Durable Object
 import { ChatThreadDurableObject } from "./durable-objects/ChatThreadDurableObject";
@@ -105,78 +102,7 @@ app.route("/v1/chats", chatRoutes);
 app.route("/v1/cleanify", cleanifyRoutes);
 app.route("/v1/campaigns", campaignsRoutes);
 app.route("/v1/uploads", uploadsRoutes);
-
-// ─── Notification endpoints ───────────────────────────────────────────────────
-
-app.get("/v1/notifications", async (c) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader?.startsWith("Bearer ")) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "UNAUTHORIZED", message: "Authentication required" },
-      },
-      401,
-    );
-  }
-
-  const { verifyJWT } = await import("./lib/utils");
-  const payload = await verifyJWT(authHeader.substring(7), c.env.JWT_SECRET);
-  if (!payload) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "INVALID_TOKEN", message: "Invalid token" },
-      },
-      401,
-    );
-  }
-
-  const limit = parseInt(c.req.query("limit") ?? "20");
-  const unreadOnly = c.req.query("unread_only") === "true";
-  const { notifications, hasMore } = await getNotificationHistory(
-    c.env.DB,
-    payload.sub,
-    limit,
-    unreadOnly,
-  );
-
-  return c.json({ success: true, data: { notifications, has_more: hasMore } });
-});
-
-app.post("/v1/notifications/read", async (c) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader?.startsWith("Bearer ")) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "UNAUTHORIZED", message: "Authentication required" },
-      },
-      401,
-    );
-  }
-
-  const { verifyJWT } = await import("./lib/utils");
-  const payload = await verifyJWT(authHeader.substring(7), c.env.JWT_SECRET);
-  if (!payload) {
-    return c.json(
-      {
-        success: false,
-        error: { code: "INVALID_TOKEN", message: "Invalid token" },
-      },
-      401,
-    );
-  }
-
-  const body = await c.req.json().catch(() => ({}));
-  const count = await markNotificationsRead(
-    c.env.DB,
-    payload.sub,
-    (body as any).notification_ids,
-  );
-
-  return c.json({ success: true, data: { marked_read: count } });
-});
+app.route("/v1/notifications", notificationRoutes);
 
 // ─── 404 / error handlers ─────────────────────────────────────────────────────
 

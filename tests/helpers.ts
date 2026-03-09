@@ -24,6 +24,7 @@ import type { Env } from "../src/types";
 import authRoutes from "../src/routes/auth";
 import userRoutes from "../src/routes/user";
 import verificationRoutes from "../src/routes/verification";
+import notificationRoutes from "../src/routes/notifications";
 import { createMockEnv } from "./fixtures";
 
 // ─── App factory ──────────────────────────────────────────────────────────────
@@ -37,6 +38,7 @@ export function createTestApp() {
   app.route("/v1/auth", authRoutes);
   app.route("/v1/me", userRoutes);
   app.route("/v1/verification", verificationRoutes);
+  app.route("/v1/notifications", notificationRoutes);
   return app;
 }
 
@@ -50,6 +52,10 @@ export function createTestEnv() {
   return {
     ...createMockEnv(),
     VERIFICATION_QUEUE: {
+      send: vi.fn().mockResolvedValue(undefined),
+      sendBatch: vi.fn().mockResolvedValue(undefined),
+    },
+    NOTIFICATION_QUEUE: {
       send: vi.fn().mockResolvedValue(undefined),
       sendBatch: vi.fn().mockResolvedValue(undefined),
     },

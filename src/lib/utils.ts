@@ -16,25 +16,107 @@ export function generateId(): string {
 // Password Hashing
 // ============================================
 
+const PBKDF2_ITERATIONS = 100_000;
+const PBKDF2_KEY_LENGTH = 256; // bits
+
 export async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder();
-  const data = encoder.encode(password + "wihda-salt");
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+
+  // 16 random bytes -> unique salt per password
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const salt = toHex(saltBytes);
+
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+
+  const hashBuffer = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: saltBytes,
+      iterations: PBKDF2_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    PBKDF2_KEY_LENGTH,
+  );
+
+  const hash = toHex(new Uint8Array(hashBuffer));
+  return `${salt}:${hash}`;
 }
 
 export async function verifyPassword(
   password: string,
-  hash: string,
+  stored: string,
 ): Promise<boolean> {
-  const passwordHash = await hashPassword(password);
-  return passwordHash === hash;
+  const parts = stored.split(":");
+  if (parts.length !== 2) return false;
+  const [salt, expectedHash] = parts;
+
+  const encoder = new TextEncoder();
+  const saltBytes = fromHex(salt);
+
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+
+  const hashBuffer = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: saltBytes,
+      iterations: PBKDF2_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    PBKDF2_KEY_LENGTH,
+  );
+
+  const hash = toHex(new Uint8Array(hashBuffer));
+
+  // Constant-time comparison to prevent timing attacks
+  if (hash.length !== expectedHash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < hash.length; i++) {
+    diff |= hash.charCodeAt(i) ^ expectedHash.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// ─── Internal hex helpers ──────────────────────────────────────────────────────
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function fromHex(hex: string): Uint8Array {
+  const pairs = hex.match(/.{2}/g);
+  if (!pairs) return new Uint8Array(0);
+  return Uint8Array.from(pairs.map((byte) => parseInt(byte, 16)));
 }
 
 // ============================================
 // JWT Handling
 // ============================================
+
+function toBase64Url(base64: string): string {
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+function fromBase64Url(base64url: string): string {
+  let base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+  while (base64.length % 4 !== 0) base64 += "=";
+  return base64;
+}
 
 /**
  * All fields accepted by createJWT. The base three fields are required;
@@ -61,6 +143,8 @@ export interface JWTOutput {
   verification_status: string | null;
   /** null when the token was issued before scope was introduced */
   scope: string | null;
+  /** Used for KV-based refresh token revocation */
+  jti: string | null;
   iat: number;
   exp: number;
 }
@@ -74,13 +158,14 @@ export async function createJWT(
   const now = Math.floor(Date.now() / 1000);
   const fullPayload = {
     ...payload,
+    jti: generateId(), // unique token ID, used for KV revocation lookups
     iat: now,
     exp: now + expiresInHours * 3600,
   };
 
   const encoder = new TextEncoder();
-  const headerB64 = btoa(JSON.stringify(header));
-  const payloadB64 = btoa(JSON.stringify(fullPayload));
+  const headerB64 = toBase64Url(btoa(JSON.stringify(header)));
+  const payloadB64 = toBase64Url(btoa(JSON.stringify(fullPayload)));
   const signatureInput = `${headerB64}.${payloadB64}`;
 
   const key = await crypto.subtle.importKey(
@@ -96,7 +181,9 @@ export async function createJWT(
     key,
     encoder.encode(signatureInput),
   );
-  const signatureB64 = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  const signatureB64 = toBase64Url(
+    btoa(String.fromCharCode(...new Uint8Array(signature))),
+  );
 
   return `${headerB64}.${payloadB64}.${signatureB64}`;
 }
@@ -121,9 +208,10 @@ export async function verifyJWT(
     );
 
     const signatureInput = `${headerB64}.${payloadB64}`;
-    const signature = Uint8Array.from(atob(signatureB64), (c) =>
+    const signature = Uint8Array.from(atob(fromBase64Url(signatureB64)), (c) =>
       c.charCodeAt(0),
     );
+
     const isValid = await crypto.subtle.verify(
       "HMAC",
       key,
@@ -132,7 +220,7 @@ export async function verifyJWT(
     );
     if (!isValid) return null;
 
-    const payload = JSON.parse(atob(payloadB64));
+    const payload = JSON.parse(atob(fromBase64Url(payloadB64)));
 
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
 
@@ -142,6 +230,7 @@ export async function verifyJWT(
       neighborhood_id: payload.neighborhood_id ?? null,
       verification_status: payload.verification_status ?? null,
       scope: payload.scope ?? null,
+      jti: payload.jti ?? null,
       iat: payload.iat,
       exp: payload.exp,
     };

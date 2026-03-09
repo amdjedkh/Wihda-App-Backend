@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import contactVerification from "../../src/routes/contact-verification";
 import { createMockEnv } from "../fixtures";
-import { createJWT } from "../../src/lib/utils";
+import { createJWT, hashPassword } from "../../src/lib/utils";
 
 // ─── Request helper ───────────────────────────────────────────────────────────
 
@@ -841,10 +841,12 @@ describe("Contact Verification — GET /status", () => {
 
 describe("Auth — login blocked when contact not verified", () => {
   let mockEnv: ReturnType<typeof makeEnv>;
+  let hashedPassword: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     mockEnv = makeEnv();
+    hashedPassword = await hashPassword("password1234");
   });
 
   it("403 — CONTACT_VERIFICATION_REQUIRED for email user who skipped OTP", async () => {
@@ -855,7 +857,7 @@ describe("Auth — login blocked when contact not verified", () => {
       id: "user-001",
       email: "user@wihda.dz",
       phone: null,
-      password_hash: "hashed_password_123",
+      password_hash: hashedPassword,
       display_name: "Test User",
       role: "user",
       status: "active",
@@ -892,7 +894,7 @@ describe("Auth — login blocked when contact not verified", () => {
       id: "user-002",
       email: null,
       phone: "+213555000001",
-      password_hash: "hashed_password_123",
+      password_hash: hashedPassword,
       display_name: "Phone User",
       role: "user",
       status: "active",

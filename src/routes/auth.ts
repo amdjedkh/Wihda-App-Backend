@@ -27,6 +27,14 @@ import {
 
 const auth = new Hono<{ Bindings: Env }>();
 
+// ─── KV key helpers ───────────────────────────────────────────────────────────
+
+const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 3600; // 168 hours
+
+function refreshTokenKey(jti: string): string {
+  return `refresh_token:${jti}`;
+}
+
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
 const signupSchema = z
@@ -112,7 +120,9 @@ auth.post("/signup", async (c) => {
 
     const session = await createVerificationSession(c.env.DB, user.id);
 
-    // Restricted token — only valid for /v1/verification/* and /v1/auth/verify/* routes
+    // Restricted token, only valid for /v1/verification/* and /v1/auth/verify/* routes.
+    // Intentionally NOT stored in KV: verification_only tokens are not refreshable
+    // and have no revocation use-case (they expire in 24 h and are single-purpose).
     const restrictedToken = await createJWT(
       {
         sub: user.id,
@@ -166,28 +176,40 @@ auth.post("/login", async (c) => {
     if (data.email) user = await getUserByEmail(c.env.DB, data.email);
     else if (data.phone) user = await getUserByPhone(c.env.DB, data.phone);
 
-    if (!user)
+    if (!user) {
       return errorResponse(
         "INVALID_CREDENTIALS",
         "Invalid email/phone or password",
         401,
       );
+    }
 
-    if (user.status === "banned")
+    const isValid = await verifyPassword(data.password, user.password_hash);
+    if (!isValid) {
+      return errorResponse(
+        "INVALID_CREDENTIALS",
+        "Invalid email/phone or password",
+        401,
+      );
+    }
+
+    // ── Account status gate ───────────────────────────────────────────────────
+    if (user.status === "banned") {
       return errorResponse(
         "ACCOUNT_BANNED",
         "Your account has been banned",
         403,
       );
-    if (user.status === "suspended")
+    }
+    if (user.status === "suspended") {
       return errorResponse(
         "ACCOUNT_SUSPENDED",
         "Your account has been temporarily suspended",
         403,
       );
+    }
 
     // ── Contact verification gate ─────────────────────────────────────────────
-    // The user must have verified at least the contact method they signed up with.
     const hasVerifiedContact =
       (user.email !== null && user.email_verified === 1) ||
       (user.phone !== null && user.phone_verified === 1);
@@ -229,14 +251,6 @@ auth.post("/login", async (c) => {
       );
     }
 
-    const isValid = await verifyPassword(data.password, user.password_hash);
-    if (!isValid)
-      return errorResponse(
-        "INVALID_CREDENTIALS",
-        "Invalid email/phone or password",
-        401,
-      );
-
     const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
 
     const tokenPayload = {
@@ -249,6 +263,13 @@ auth.post("/login", async (c) => {
 
     const accessToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 24);
     const refreshToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 168);
+
+    const refreshPayload = await verifyJWT(refreshToken, c.env.JWT_SECRET);
+    if (refreshPayload?.jti) {
+      await c.env.KV.put(refreshTokenKey(refreshPayload.jti), user.id, {
+        expirationTtl: REFRESH_TOKEN_TTL_SECONDS,
+      });
+    }
 
     const response: LoginResponse = {
       access_token: accessToken,
@@ -283,16 +304,18 @@ auth.post("/refresh", async (c) => {
     const body = await c.req.json();
     const { refresh_token } = body as { refresh_token?: string };
 
-    if (!refresh_token)
+    if (!refresh_token) {
       return errorResponse("MISSING_TOKEN", "Refresh token is required", 400);
+    }
 
     const payload = await verifyJWT(refresh_token, c.env.JWT_SECRET);
-    if (!payload)
+    if (!payload) {
       return errorResponse(
         "INVALID_TOKEN",
         "Invalid or expired refresh token",
         401,
       );
+    }
 
     if (payload.scope === "verification_only") {
       return errorResponse(
@@ -302,8 +325,33 @@ auth.post("/refresh", async (c) => {
       );
     }
 
+    // ── KV revocation check ───────────────────────────────────────────────────
+    if (!payload.jti) {
+      return errorResponse(
+        "INVALID_TOKEN",
+        "Invalid or expired refresh token",
+        401,
+      );
+    }
+
+    const storedUserId = await c.env.KV.get(refreshTokenKey(payload.jti));
+    if (!storedUserId || storedUserId !== payload.sub) {
+      // Token was already used, revoked, or doesn't belong to this user.
+      return errorResponse(
+        "INVALID_TOKEN",
+        "Invalid or expired refresh token",
+        401,
+      );
+    }
+
+    // Delete the old jti immediately, token rotation: each refresh token is single-use. If someone replays a used token, it will be rejected.
+    await c.env.KV.delete(refreshTokenKey(payload.jti));
+
+    // ── Re-validate user state ────────────────────────────────────────────────
     const user = await getUserById(c.env.DB, payload.sub);
-    if (!user) return errorResponse("USER_NOT_FOUND", "User not found", 404);
+    if (!user) {
+      return errorResponse("USER_NOT_FOUND", "User not found", 404);
+    }
 
     // Re-check contact verification in case something changed
     const hasVerifiedContact =
@@ -343,6 +391,17 @@ auth.post("/refresh", async (c) => {
       c.env.JWT_SECRET,
       168,
     );
+
+    // Store the new refresh token's jti in KV
+    const newRefreshPayload = await verifyJWT(
+      newRefreshToken,
+      c.env.JWT_SECRET,
+    );
+    if (newRefreshPayload?.jti) {
+      await c.env.KV.put(refreshTokenKey(newRefreshPayload.jti), user.id, {
+        expirationTtl: REFRESH_TOKEN_TTL_SECONDS,
+      });
+    }
 
     const response: LoginResponse = {
       access_token: accessToken,

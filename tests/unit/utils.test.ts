@@ -42,11 +42,11 @@ describe("UUID Generation", () => {
 });
 
 describe("Password Hashing", () => {
-  it("should hash a password consistently", async () => {
+  it("should hash a password and verify correctly (non-deterministic by design)", async () => {
     const password = "testPassword123";
-    const hash1 = await hashPassword(password);
-    const hash2 = await hashPassword(password);
-    expect(hash1).toBe(hash2);
+    const hash = await hashPassword(password);
+    const isValid = await verifyPassword(password, hash);
+    expect(isValid).toBe(true);
   });
 
   it("should produce different hashes for different passwords", async () => {
@@ -68,9 +68,9 @@ describe("Password Hashing", () => {
     expect(isValid).toBe(false);
   });
 
-  it("should produce 64 character hex string", async () => {
+  it("should produce the expected salt:hash storage format", async () => {
     const hash = await hashPassword("test");
-    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(hash).toMatch(/^[0-9a-f]{32}:[0-9a-f]{64}$/);
   });
 });
 

@@ -41,7 +41,13 @@ describe("Leftovers Routes", () => {
     vi.clearAllMocks();
     mockEnv = createMockEnv();
     accessToken = await createJWT(
-      { sub: "user-003", role: "user", neighborhood_id: "nb-001" },
+      {
+        sub: "user-003",
+        role: "user",
+        neighborhood_id: "nb-001",
+        verification_status: "verified",
+        scope: "full",
+      },
       mockEnv.JWT_SECRET,
       24,
     );
@@ -85,7 +91,13 @@ describe("Leftovers Routes", () => {
       mockEnv.DB.first.mockResolvedValueOnce(null); // No neighborhood
 
       const token = await createJWT(
-        { sub: "user-003", role: "user", neighborhood_id: null },
+        {
+          sub: "user-003",
+          role: "user",
+          neighborhood_id: null,
+          verification_status: "verified",
+          scope: "full",
+        },
         mockEnv.JWT_SECRET,
         24,
       );

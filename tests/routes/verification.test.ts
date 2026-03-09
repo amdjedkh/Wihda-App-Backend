@@ -457,7 +457,11 @@ describe("GET /v1/verification/status", () => {
 
   it("returns session info when a session exists", async () => {
     const token = await makeToken(env);
-    mockFirstOnce(env, SESSION_PENDING);
+    mockFirstOnce(env, {
+      id: "user-test-001",
+      verification_status: "unverified",
+    }); // getUserById
+    mockFirstOnce(env, SESSION_PENDING); // getLatestVerificationSessionForUser
 
     const res = await app.request(
       "/v1/verification/status",
@@ -475,7 +479,11 @@ describe("GET /v1/verification/status", () => {
 
   it("returns null session when user has no sessions", async () => {
     const token = await makeToken(env);
-    mockFirstOnce(env, null);
+    mockFirstOnce(env, {
+      id: "user-test-001",
+      verification_status: "unverified",
+    }); // getUserById
+    mockFirstOnce(env, null); // getLatestVerificationSessionForUser → no session
 
     const res = await app.request(
       "/v1/verification/status",
@@ -489,7 +497,9 @@ describe("GET /v1/verification/status", () => {
 
   it("exposes rejection_reason on a failed session", async () => {
     const token = await makeToken(env);
+    mockFirstOnce(env, { id: "user-test-001", verification_status: "failed" }); // getUserById
     mockFirstOnce(env, {
+      // getLatestVerificationSessionForUser
       ...SESSION_WITH_DOCS,
       status: "failed",
       ai_rejection_reason: "Document appears to be altered.",

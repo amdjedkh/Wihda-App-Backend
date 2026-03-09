@@ -18,6 +18,7 @@ import {
   createVerificationSession,
   updateVerificationSession,
   updateUserVerificationStatus,
+  getUserById,
 } from "../lib/db";
 import { successResponse, errorResponse } from "../lib/utils";
 import { createUploadToken } from "../lib/upload-token";
@@ -70,12 +71,17 @@ const manualReviewSchema = z.object({
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Builds a presigned upload URL using the existing upload-token infrastructure.
- *
- * The base URL is derived from the incoming request so this works correctly
- * in every environment (local, staging, production).
- */
+function timingSafeEqual(a: string, b: string): boolean {
+  const aBytes = new TextEncoder().encode(a);
+  const bBytes = new TextEncoder().encode(b);
+  if (aBytes.length !== bBytes.length) return false;
+  let diff = 0;
+  for (let i = 0; i < aBytes.length; i++) {
+    diff |= aBytes[i] ^ bBytes[i];
+  }
+  return diff === 0;
+}
+
 async function generateDocumentPresignedUrl(
   secret: string,
   requestUrl: string,
@@ -114,6 +120,16 @@ verification.post("/start", authMiddleware, async (c) => {
       c.env.DB,
       auth.userId,
     );
+
+    if (existing && existing.status === "processing") {
+      return successResponse({
+        session_id: existing.id,
+        status: "processing",
+        expires_at: existing.expires_at,
+        message:
+          "Your documents are currently being reviewed. Please poll /status for updates.",
+      });
+    }
 
     if (
       existing &&
@@ -216,7 +232,7 @@ verification.post("/presigned-url", authMiddleware, async (c) => {
     }
 
     const result = await generateDocumentPresignedUrl(
-      c.env.JWT_SECRET, // upload tokens use the same HMAC secret
+      c.env.JWT_SECRET,
       c.req.url,
       auth.userId,
       session_id,
@@ -338,13 +354,18 @@ verification.get("/status", authMiddleware, async (c) => {
   const auth = getAuthContext(c)!;
 
   try {
+    const user = await getUserById(c.env.DB, auth.userId);
+    if (!user) {
+      return errorResponse("USER_NOT_FOUND", "User not found", 404);
+    }
+
     const session = await getLatestVerificationSessionForUser(
       c.env.DB,
       auth.userId,
     );
 
     return successResponse({
-      verification_status: auth.verificationStatus,
+      verification_status: user.verification_status, // live DB value
       session: session
         ? {
             id: session.id,
@@ -370,12 +391,12 @@ verification.get("/status", authMiddleware, async (c) => {
 
 /**
  * Internal endpoint called by the verification queue consumer after Gemini responds.
- *
- * This route is intentionally NOT behind authMiddleware.
+ * NOT behind authMiddleware - protected by INTERNAL_WEBHOOK_SECRET instead.
  */
 verification.post("/webhook", async (c) => {
   const secret = c.req.header("X-Internal-Secret");
-  if (!secret || secret !== c.env.INTERNAL_WEBHOOK_SECRET) {
+
+  if (!secret || !timingSafeEqual(secret, c.env.INTERNAL_WEBHOOK_SECRET)) {
     return errorResponse("UNAUTHORIZED", "Invalid internal secret", 401);
   }
 
@@ -398,7 +419,6 @@ verification.post("/webhook", async (c) => {
     if (!session)
       return errorResponse("SESSION_NOT_FOUND", "Session not found", 404);
 
-    // Idempotency — ignore if already finalized
     if (session.status === "verified" || session.status === "failed") {
       return successResponse({ already_finalized: true });
     }
@@ -452,7 +472,7 @@ verification.post("/webhook", async (c) => {
 
 // ─── POST /v1/verification/admin/review ───────────────────────────────────────
 
-/** Admin manual override — approve or reject any session. */
+/** Admin manual override, approve or reject any session. */
 verification.post("/admin/review", authMiddleware, requireAdmin, async (c) => {
   const auth = getAuthContext(c)!;
 
@@ -473,6 +493,13 @@ verification.post("/admin/review", authMiddleware, requireAdmin, async (c) => {
     if (!session)
       return errorResponse("SESSION_NOT_FOUND", "Session not found", 404);
 
+    if (session.status === "verified" || session.status === "failed") {
+      return successResponse({
+        already_finalized: true,
+        status: session.status,
+      });
+    }
+
     const newStatus = approved ? "verified" : "failed";
 
     await updateVerificationSession(c.env.DB, session_id, {
@@ -486,6 +513,25 @@ verification.post("/admin/review", authMiddleware, requireAdmin, async (c) => {
       c.env.DB,
       session.user_id,
       approved ? "verified" : "failed",
+    );
+    await c.env.NOTIFICATION_QUEUE.send(
+      approved
+        ? {
+            user_id: session.user_id,
+            type: "verification_approved",
+            title: "Identity Verified ✓",
+            body: "Your identity has been verified. You now have full access to Wihda.",
+            timestamp: new Date().toISOString(),
+          }
+        : {
+            user_id: session.user_id,
+            type: "verification_rejected",
+            title: "Verification Failed",
+            body:
+              note ??
+              "Your verification was not approved. Please contact support for details.",
+            timestamp: new Date().toISOString(),
+          },
     );
 
     return successResponse({ finalized: true, status: newStatus });

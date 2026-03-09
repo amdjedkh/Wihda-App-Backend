@@ -66,6 +66,17 @@ Respond ONLY with a valid JSON object — no markdown, no preamble, no extra tex
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 8192; // 8 KB chunks, well within V8 argument limit
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 /** Fetch an R2 object and return base64-encoded bytes + inferred MIME type. */
 async function fetchR2AsBase64(
   storage: R2Bucket,
@@ -75,7 +86,7 @@ async function fetchR2AsBase64(
   if (!obj) return null;
 
   const bytes = await obj.arrayBuffer();
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  const base64 = arrayBufferToBase64(bytes);
 
   const ext = key.split(".").pop()?.toLowerCase() ?? "jpg";
   const mimeMap: Record<string, string> = {
@@ -138,7 +149,7 @@ async function runGeminiVerification(
     body: JSON.stringify({
       contents,
       generationConfig: {
-        temperature: 0.1, // deterministic output
+        temperature: 0.1,
         maxOutputTokens: 512,
         responseMimeType: "application/json",
       },
@@ -194,7 +205,7 @@ async function runGeminiVerification(
   return { approved, confidence, rejection_reason, raw: parsed };
 }
 
-// ─── DB write helpers (inlined to avoid circular imports with routes/db.ts) ────
+// ─── DB write helpers ─────────────────────────────────────────────────────────
 
 /** Write the AI review result back to the verification_sessions row. */
 async function finalizeSession(
@@ -243,7 +254,7 @@ export async function handleVerificationQueue(
   for (const message of batch.messages) {
     const { type, session_id, user_id } = message.body;
 
-    // ── Expire stale sessions (runs on the existing scheduled cron) ─────────
+    // ── Expire stale sessions ────────────────────────────────────────────────
     if (type === "expire_sessions") {
       try {
         await env.DB.prepare(
@@ -251,12 +262,10 @@ export async function handleVerificationQueue(
           UPDATE verification_sessions
           SET    status = 'expired', updated_at = datetime('now')
           WHERE  expires_at < datetime('now')
-            AND  status IN ('created', 'pending')
-        `,
+            AND  status IN ('created', 'pending', 'processing')
+          `,
         ).run();
 
-        // Users whose only active session just expired go back to unverified
-        // so they can start a new session rather than being stuck in 'pending'.
         await env.DB.prepare(
           `
           UPDATE users
@@ -266,7 +275,7 @@ export async function handleVerificationQueue(
               SELECT user_id FROM verification_sessions
               WHERE  status IN ('created', 'pending', 'processing', 'verified')
             )
-        `,
+          `,
         ).run();
 
         message.ack();
@@ -314,8 +323,7 @@ export async function handleVerificationQueue(
           .bind(session_id)
           .run();
 
-        // Documents-missing guard (should never happen after /submit validation,
-        // but defensive programming prevents a silent failure)
+        // Documents-missing guard (should never happen after /submit validation, but defensive programming prevents a silent failure)
         if (!row.front_doc_key || !row.back_doc_key || !row.selfie_key) {
           const fallback: VerificationResult = {
             approved: false,
@@ -386,7 +394,6 @@ export async function handleVerificationQueue(
               },
         );
 
-        // PII retention: delete raw document images regardless of outcome
         await Promise.allSettled([
           env.STORAGE.delete(row.front_doc_key),
           env.STORAGE.delete(row.back_doc_key),
@@ -398,6 +405,13 @@ export async function handleVerificationQueue(
         console.error(`run_ai_check error for session ${session_id}:`, err);
         message.retry();
       }
+      continue;
     }
+
+    console.warn(
+      `Unrecognised verification queue message type: '${type}' - acking to discard`,
+      { type, session_id, user_id },
+    );
+    message.ack();
   }
 }

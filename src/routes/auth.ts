@@ -216,6 +216,18 @@ auth.post("/login", async (c) => {
 
     if (!hasVerifiedContact) {
       const channel = user.email ? "email" : "phone";
+      const restrictedToken = await createJWT(
+        {
+          sub: user.id,
+          role: user.role,
+          neighborhood_id: null,
+          verification_status: user.verification_status,
+          scope: "verification_only",
+        },
+        c.env.JWT_SECRET,
+        24,
+      );
+
       return c.json(
         {
           success: false,
@@ -223,7 +235,11 @@ auth.post("/login", async (c) => {
             code: "CONTACT_VERIFICATION_REQUIRED",
             message:
               "Please verify your email or phone number before logging in.",
-            details: { contact_channel: channel },
+            details: {
+              contact_channel: channel,
+              restricted_token: restrictedToken,
+              expires_in: 86400,
+            },
           },
         },
         403,
@@ -232,20 +248,41 @@ auth.post("/login", async (c) => {
 
     // ── KYC gate ──────────────────────────────────────────────────────────────
     if (user.verification_status !== "verified") {
+      const canRetry =
+        user.verification_status === "unverified" ||
+        user.verification_status === "pending" ||
+        user.verification_status === "failed";
+
       const message =
         user.verification_status === "unverified" ||
         user.verification_status === "pending"
           ? "Your identity has not been verified yet. Please complete the verification process."
           : "Your verification was rejected. Please contact support or retry.";
 
+      const details: Record<string, unknown> = {
+        verification_status: user.verification_status,
+      };
+
+      if (canRetry) {
+        const restrictedToken = await createJWT(
+          {
+            sub: user.id,
+            role: user.role,
+            neighborhood_id: null,
+            verification_status: user.verification_status,
+            scope: "verification_only",
+          },
+          c.env.JWT_SECRET,
+          24,
+        );
+        details.restricted_token = restrictedToken;
+        details.expires_in = 86400;
+      }
+
       return c.json(
         {
           success: false,
-          error: {
-            code: "VERIFICATION_REQUIRED",
-            message,
-            details: { verification_status: user.verification_status },
-          },
+          error: { code: "VERIFICATION_REQUIRED", message, details },
         },
         403,
       );

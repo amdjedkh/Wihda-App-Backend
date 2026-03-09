@@ -19,7 +19,7 @@ describe("Matching Logic", () => {
         diet_constraints: ["halal"],
         portions: 4,
         pickup_time_preference: "evening",
-        distance_willing_km: 5,
+        distance_willing_km: 20,
       };
 
       const offer: LeftoverOffer = {

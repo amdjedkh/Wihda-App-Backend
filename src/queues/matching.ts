@@ -3,89 +3,141 @@
  * Queue consumer for matching offers and needs
  */
 
-import type { Env, MatchingQueueMessage, LeftoverOffer, LeftoverNeed, LeftoverSurvey } from '../types';
-import { getLeftoverOfferById, getActiveLeftoverOffers, getLeftoverNeedById, getActiveLeftoverNeeds, createMatch, createChatThread } from '../lib/db';
-import { safeJsonParse, toISODateString } from '../lib/utils';
+import type {
+  Env,
+  MatchingQueueMessage,
+  LeftoverOffer,
+  LeftoverNeed,
+  LeftoverSurvey,
+} from "../types";
+import {
+  getLeftoverOfferById,
+  getActiveLeftoverOffers,
+  getLeftoverNeedById,
+  getActiveLeftoverNeeds,
+  createMatch,
+  createChatThread,
+} from "../lib/db";
+import { safeJsonParse, toISODateString } from "../lib/utils";
 
 /**
  * Calculate match score between an offer and a need
  */
-export function calculateMatchScore(offer: LeftoverOffer, need: LeftoverNeed): { score: number; reasons: string[] } {
-  const offerSurvey = safeJsonParse<LeftoverSurvey>(offer.survey_json, {} as LeftoverSurvey);
-  const needSurvey = safeJsonParse<LeftoverSurvey>(need.survey_json, {} as LeftoverSurvey);
-  
+export function calculateMatchScore(
+  offer: LeftoverOffer,
+  need: LeftoverNeed,
+): { score: number; reasons: string[] } {
+  const offerSurvey = safeJsonParse<LeftoverSurvey>(
+    offer.survey_json,
+    {} as LeftoverSurvey,
+  );
+  const needSurvey = safeJsonParse<LeftoverSurvey>(
+    need.survey_json,
+    {} as LeftoverSurvey,
+  );
+
   const reasons: string[] = [];
   let totalScore = 0;
   let maxScore = 0;
-  
+
   // 1. Food type match (weight: 0.5)
   maxScore += 50;
   if (offerSurvey.food_type === needSurvey.food_type) {
     totalScore += 50;
-    reasons.push('Food type matches');
-  } else if (needSurvey.food_type === 'other' || offerSurvey.food_type === 'other') {
+    reasons.push("Food type matches");
+  } else if (
+    needSurvey.food_type === "other" ||
+    offerSurvey.food_type === "other"
+  ) {
     totalScore += 25;
-    reasons.push('Food type compatible');
+    reasons.push("Food type compatible");
   }
-  
+
   // 2. Diet constraints match (weight: 0.2)
   maxScore += 20;
   const offerConstraints = new Set(offerSurvey.diet_constraints || []);
   const needConstraints = new Set(needSurvey.diet_constraints || []);
-  
+
   if (needConstraints.size === 0 || offerConstraints.size === 0) {
     totalScore += 20;
-    reasons.push('No specific dietary requirements');
+    reasons.push("No specific dietary requirements");
   } else {
     // Check if offer satisfies all need constraints
-    const satisfiedConstraints = [...needConstraints].filter(c => offerConstraints.has(c));
+    const satisfiedConstraints = [...needConstraints].filter((c) =>
+      offerConstraints.has(c),
+    );
     const score = (satisfiedConstraints.length / needConstraints.size) * 20;
     totalScore += score;
     if (satisfiedConstraints.length === needConstraints.size) {
-      reasons.push('All dietary requirements satisfied');
+      reasons.push("All dietary requirements satisfied");
     } else if (satisfiedConstraints.length > 0) {
-      reasons.push(`${satisfiedConstraints.length}/${needConstraints.size} dietary requirements satisfied`);
+      reasons.push(
+        `${satisfiedConstraints.length}/${needConstraints.size} dietary requirements satisfied`,
+      );
     }
   }
-  
+
   // 3. Portions match (weight: 0.15)
   maxScore += 15;
   if (offerSurvey.portions >= needSurvey.portions) {
     totalScore += 15;
-    reasons.push('Sufficient portions available');
+    reasons.push("Sufficient portions available");
   } else {
     // Partial score if offer has at least half the needed portions
     const ratio = offerSurvey.portions / needSurvey.portions;
     totalScore += ratio * 15;
     if (ratio >= 0.5) {
-      reasons.push('Partial portion match');
+      reasons.push("Partial portion match");
     }
   }
-  
+
   // 4. Pickup time match (weight: 0.1)
   maxScore += 10;
-  if (offerSurvey.pickup_time_preference === needSurvey.pickup_time_preference) {
+  if (
+    offerSurvey.pickup_time_preference === needSurvey.pickup_time_preference
+  ) {
     totalScore += 10;
-    reasons.push('Pickup time matches');
-  } else if (offerSurvey.pickup_time_preference === 'flexible' || needSurvey.pickup_time_preference === 'flexible') {
+    reasons.push("Pickup time matches");
+  } else if (
+    offerSurvey.pickup_time_preference === "flexible" ||
+    needSurvey.pickup_time_preference === "flexible"
+  ) {
     totalScore += 7;
-    reasons.push('Flexible pickup time');
+    reasons.push("Flexible pickup time");
   } else {
-    // Morning/afternoon overlap is reasonable
     totalScore += 3;
+    reasons.push(
+      `Pickup time differs (${offerSurvey.pickup_time_preference} vs ${needSurvey.pickup_time_preference})`,
+    );
   }
-  
-  // 5. Distance match (weight: 0.05)
+
+  // 5. Distance willingness match (weight: 0.05)
+  // scale the 5 points by the limiting party's willingness.
+  //   min(offer.distance, need.distance) / MAX_DISTANCE_KM
+  //
+  // This penalises pairs where at least one party has low willingness:
+  //   both at 20km  -> 5.0 pts (full)
+  //   both at 10km  -> 2.5 pts
+  //   one at 0.5km  -> 0.125 pts (heavy penalty, likely kills borderline pairs)
   maxScore += 5;
-  const minDistance = Math.min(
-    offerSurvey.distance_willing_km || 5,
-    needSurvey.distance_willing_km || 5
-  );
-  totalScore += 5; // Assume within distance for same neighborhood
-  reasons.push(`Within ${minDistance}km`);
-  
+  const MAX_DISTANCE_KM = 20;
+  const offerDistance = offerSurvey.distance_willing_km || 5;
+  const needDistance = needSurvey.distance_willing_km || 5;
+  const minDistance = Math.min(offerDistance, needDistance);
+  const distanceScore = (minDistance / MAX_DISTANCE_KM) * 5;
+  totalScore += distanceScore;
+  if (distanceScore >= 4) {
+    reasons.push(`Both willing to travel up to ${minDistance}km`);
+  } else if (distanceScore >= 2) {
+    reasons.push(`Limited distance willingness (${minDistance}km)`);
+  } else {
+    reasons.push(
+      `Low distance willingness (${minDistance}km) — may be difficult to arrange`,
+    );
+  }
+
   const normalizedScore = totalScore / maxScore;
-  
+
   return { score: normalizedScore, reasons };
 }
 
@@ -95,30 +147,32 @@ export function calculateMatchScore(offer: LeftoverOffer, need: LeftoverNeed): {
 async function matchOffer(
   env: Env,
   offerId: string,
-  neighborhoodId: string
+  neighborhoodId: string,
 ): Promise<void> {
   const offer = await getLeftoverOfferById(env.DB, offerId);
-  if (!offer || offer.status !== 'active') {
+  if (!offer || offer.status !== "active") {
     return;
   }
-  
+
   // Get all active needs in the same neighborhood
   const needs = await getActiveLeftoverNeeds(env.DB, neighborhoodId);
-  
+
   // Filter out needs from the same user
-  const candidateNeeds = needs.filter(n => n.user_id !== offer.user_id);
-  
+  const candidateNeeds = needs.filter((n) => n.user_id !== offer.user_id);
+
   // Calculate scores and sort
-  const scoredMatches = candidateNeeds.map(need => {
-    const { score, reasons } = calculateMatchScore(offer, need);
-    return { need, score, reasons };
-  }).filter(m => m.score >= 0.4) // Minimum threshold
+  const scoredMatches = candidateNeeds
+    .map((need) => {
+      const { score, reasons } = calculateMatchScore(offer, need);
+      return { need, score, reasons };
+    })
+    .filter((m) => m.score >= 0.4) // Minimum threshold
     .sort((a, b) => b.score - a.score);
-  
+
   // Create match for the best candidate
   if (scoredMatches.length > 0) {
     const best = scoredMatches[0];
-    
+
     try {
       // Create match
       const match = await createMatch(env.DB, {
@@ -128,41 +182,41 @@ async function matchOffer(
         offerUserId: offer.user_id,
         needUserId: best.need.user_id,
         score: best.score,
-        matchReason: JSON.stringify(best.reasons)
+        matchReason: JSON.stringify(best.reasons),
       });
-      
+
       // Create chat thread
       await createChatThread(env.DB, {
         matchId: match.id,
         neighborhoodId,
         participant1Id: offer.user_id,
-        participant2Id: best.need.user_id
+        participant2Id: best.need.user_id,
       });
-      
+
       // Send notifications to both users
       await Promise.all([
         env.NOTIFICATION_QUEUE.send({
           user_id: offer.user_id,
-          type: 'match_created',
-          title: 'New Match!',
+          type: "match_created",
+          title: "New Match!",
           body: `Your offer "${offer.title}" has been matched with a neighbor in need.`,
           data: { match_id: match.id },
-          timestamp: toISODateString()
+          timestamp: toISODateString(),
         }),
         env.NOTIFICATION_QUEUE.send({
           user_id: best.need.user_id,
-          type: 'match_created',
-          title: 'New Match!',
-          body: 'A leftover offer has been matched with your need.',
+          type: "match_created",
+          title: "New Match!",
+          body: "A leftover offer has been matched with your need.",
           data: { match_id: match.id },
-          timestamp: toISODateString()
-        })
+          timestamp: toISODateString(),
+        }),
       ]);
-      
+
       console.log(`Created match ${match.id} with score ${best.score}`);
     } catch (error) {
       // Match may already exist - this is fine
-      console.log('Match creation skipped (may already exist)');
+      console.log("Match creation skipped (may already exist)");
     }
   }
 }
@@ -173,30 +227,32 @@ async function matchOffer(
 async function matchNeed(
   env: Env,
   needId: string,
-  neighborhoodId: string
+  neighborhoodId: string,
 ): Promise<void> {
   const need = await getLeftoverNeedById(env.DB, needId);
-  if (!need || need.status !== 'active') {
+  if (!need || need.status !== "active") {
     return;
   }
-  
+
   // Get all active offers in the same neighborhood
   const offers = await getActiveLeftoverOffers(env.DB, neighborhoodId);
-  
+
   // Filter out offers from the same user
-  const candidateOffers = offers.filter(o => o.user_id !== need.user_id);
-  
+  const candidateOffers = offers.filter((o) => o.user_id !== need.user_id);
+
   // Calculate scores and sort
-  const scoredMatches = candidateOffers.map(offer => {
-    const { score, reasons } = calculateMatchScore(offer, need);
-    return { offer, score, reasons };
-  }).filter(m => m.score >= 0.4)
+  const scoredMatches = candidateOffers
+    .map((offer) => {
+      const { score, reasons } = calculateMatchScore(offer, need);
+      return { offer, score, reasons };
+    })
+    .filter((m) => m.score >= 0.4)
     .sort((a, b) => b.score - a.score);
-  
+
   // Create match for the best candidate
   if (scoredMatches.length > 0) {
     const best = scoredMatches[0];
-    
+
     try {
       const match = await createMatch(env.DB, {
         neighborhoodId,
@@ -205,38 +261,38 @@ async function matchNeed(
         offerUserId: best.offer.user_id,
         needUserId: need.user_id,
         score: best.score,
-        matchReason: JSON.stringify(best.reasons)
+        matchReason: JSON.stringify(best.reasons),
       });
-      
+
       await createChatThread(env.DB, {
         matchId: match.id,
         neighborhoodId,
         participant1Id: best.offer.user_id,
-        participant2Id: need.user_id
+        participant2Id: need.user_id,
       });
-      
+
       await Promise.all([
         env.NOTIFICATION_QUEUE.send({
           user_id: best.offer.user_id,
-          type: 'match_created',
-          title: 'New Match!',
+          type: "match_created",
+          title: "New Match!",
           body: `Your offer "${best.offer.title}" has been matched with a neighbor in need.`,
           data: { match_id: match.id },
-          timestamp: toISODateString()
+          timestamp: toISODateString(),
         }),
         env.NOTIFICATION_QUEUE.send({
           user_id: need.user_id,
-          type: 'match_created',
-          title: 'New Match!',
-          body: 'A leftover offer has been matched with your need.',
+          type: "match_created",
+          title: "New Match!",
+          body: "A leftover offer has been matched with your need.",
           data: { match_id: match.id },
-          timestamp: toISODateString()
-        })
+          timestamp: toISODateString(),
+        }),
       ]);
-      
+
       console.log(`Created match ${match.id} with score ${best.score}`);
     } catch (error) {
-      console.log('Match creation skipped (may already exist)');
+      console.log("Match creation skipped (may already exist)");
     }
   }
 }
@@ -246,39 +302,45 @@ async function matchNeed(
  */
 async function runScheduledMatching(
   env: Env,
-  neighborhoodId: string
+  neighborhoodId: string,
 ): Promise<void> {
   // Get all active offers and needs
   const [offers, needs] = await Promise.all([
     getActiveLeftoverOffers(env.DB, neighborhoodId),
-    getActiveLeftoverNeeds(env.DB, neighborhoodId)
+    getActiveLeftoverNeeds(env.DB, neighborhoodId),
   ]);
-  
+
   // Find best matches using stable matching algorithm (simplified)
   const matchedOffers = new Set<string>();
   const matchedNeeds = new Set<string>();
-  
+
   // Calculate all pairwise scores
-  const allScores: { offer: LeftoverOffer; need: LeftoverNeed; score: number }[] = [];
-  
+  const allScores: {
+    offer: LeftoverOffer;
+    need: LeftoverNeed;
+    score: number;
+  }[] = [];
+
   for (const offer of offers) {
     for (const need of needs) {
       if (offer.user_id === need.user_id) continue;
-      
+
       const { score } = calculateMatchScore(offer, need);
       if (score >= 0.4) {
         allScores.push({ offer, need, score });
       }
     }
   }
-  
+
   // Sort by score descending
   allScores.sort((a, b) => b.score - a.score);
-  
+
   // Greedy matching
   for (const { offer, need, score } of allScores) {
     if (matchedOffers.has(offer.id) || matchedNeeds.has(need.id)) continue;
-    
+
+    const { reasons } = calculateMatchScore(offer, need);
+
     try {
       const match = await createMatch(env.DB, {
         neighborhoodId,
@@ -287,38 +349,38 @@ async function runScheduledMatching(
         offerUserId: offer.user_id,
         needUserId: need.user_id,
         score,
-        matchReason: JSON.stringify(['Scheduled match'])
+        matchReason: JSON.stringify(reasons),
       });
-      
+
       await createChatThread(env.DB, {
         matchId: match.id,
         neighborhoodId,
         participant1Id: offer.user_id,
-        participant2Id: need.user_id
+        participant2Id: need.user_id,
       });
-      
+
       matchedOffers.add(offer.id);
       matchedNeeds.add(need.id);
-      
+
       await Promise.all([
         env.NOTIFICATION_QUEUE.send({
           user_id: offer.user_id,
-          type: 'match_created',
-          title: 'New Match!',
+          type: "match_created",
+          title: "New Match!",
           body: `Your offer "${offer.title}" has been matched with a neighbor in need.`,
           data: { match_id: match.id },
-          timestamp: toISODateString()
+          timestamp: toISODateString(),
         }),
         env.NOTIFICATION_QUEUE.send({
           user_id: need.user_id,
-          type: 'match_created',
-          title: 'New Match!',
-          body: 'A leftover offer has been matched with your need.',
+          type: "match_created",
+          title: "New Match!",
+          body: "A leftover offer has been matched with your need.",
           data: { match_id: match.id },
-          timestamp: toISODateString()
-        })
+          timestamp: toISODateString(),
+        }),
       ]);
-      
+
       console.log(`Scheduled match created: ${match.id}`);
     } catch (error) {
       // Skip if match already exists
@@ -331,35 +393,35 @@ async function runScheduledMatching(
  */
 export async function handleMatchingQueue(
   batch: MessageBatch<MatchingQueueMessage>,
-  env: Env
+  env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
     const msg = message.body;
-    
+
     try {
       switch (msg.type) {
-        case 'match_offer':
+        case "match_offer":
           if (msg.offer_id && msg.neighborhood_id) {
             await matchOffer(env, msg.offer_id, msg.neighborhood_id);
           }
           break;
-          
-        case 'match_need':
+
+        case "match_need":
           if (msg.need_id && msg.neighborhood_id) {
             await matchNeed(env, msg.need_id, msg.neighborhood_id);
           }
           break;
-          
-        case 'scheduled_matching':
+
+        case "scheduled_matching":
           if (msg.neighborhood_id) {
             await runScheduledMatching(env, msg.neighborhood_id);
           }
           break;
       }
-      
+
       message.ack();
     } catch (error) {
-      console.error('Matching error:', error);
+      console.error("Matching error:", error);
       message.retry();
     }
   }

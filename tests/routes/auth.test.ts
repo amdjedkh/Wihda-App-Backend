@@ -23,7 +23,7 @@ import {
   mockFirstOnce,
   mockRunOnce,
 } from "../helpers";
-import { createJWT, hashPassword } from "../../src/lib/utils";
+import { createJWT, verifyJWT, hashPassword } from "../../src/lib/utils";
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -387,6 +387,9 @@ describe("POST /v1/auth/refresh", () => {
       env.JWT_SECRET,
       168,
     );
+
+    const tokenPayload = await verifyJWT(token, env.JWT_SECRET);
+    (env.KV.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce("user-001");
 
     mockFirstOnce(env, { ...VERIFIED_USER, id: "user-001" }); // getUserById
     mockFirstOnce(env, null); // getUserNeighborhood

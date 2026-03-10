@@ -286,11 +286,11 @@ export async function getCoinLedgerEntries(
   const params: (string | number)[] = [userId];
 
   if (cursor) {
-    query += " AND created_at < ?";
+    query += ` AND rowid < (SELECT rowid FROM coin_ledger_entries WHERE id = ?)`;
     params.push(cursor);
   }
 
-  query += " ORDER BY created_at DESC LIMIT ?";
+  query += " ORDER BY rowid DESC LIMIT ?";
   params.push(limit + 1);
 
   const result = await db
@@ -353,6 +353,65 @@ export async function createCoinEntry(
     }
     throw error;
   }
+}
+
+export async function getCoinEntryById(
+  db: D1Database,
+  entryId: string,
+): Promise<CoinLedgerEntry | null> {
+  return db
+    .prepare("SELECT * FROM coin_ledger_entries WHERE id = ?")
+    .bind(entryId)
+    .first<CoinLedgerEntry>();
+}
+
+export async function voidCoinEntry(
+  db: D1Database,
+  entryId: string,
+  voidedBy: string,
+  voidReason: string,
+): Promise<void> {
+  const now = toISODateString();
+  await db
+    .prepare(
+      `UPDATE coin_ledger_entries
+       SET status = 'void', voided_at = ?, voided_by = ?, void_reason = ?
+       WHERE id = ?`,
+    )
+    .bind(now, voidedBy, voidReason, entryId)
+    .run();
+}
+
+// getCoinHistory is the same as getCoinLedgerEntries but includes all statuses
+// (valid + void) - used by GET /v1/me/coins/history for a full audit trail.
+export async function getCoinHistory(
+  db: D1Database,
+  userId: string,
+  limit: number = 50,
+  cursor?: string,
+): Promise<{ entries: CoinLedgerEntry[]; hasMore: boolean }> {
+  let query = `
+    SELECT * FROM coin_ledger_entries
+    WHERE user_id = ?
+  `;
+  const params: (string | number)[] = [userId];
+
+  if (cursor) {
+    query += ` AND rowid < (SELECT rowid FROM coin_ledger_entries WHERE id = ?)`;
+    params.push(cursor);
+  }
+
+  query += " ORDER BY rowid DESC LIMIT ?";
+  params.push(limit + 1);
+
+  const result = await db
+    .prepare(query)
+    .bind(...params)
+    .all<CoinLedgerEntry>();
+  const entries = result.results.slice(0, limit);
+  const hasMore = result.results.length > limit;
+
+  return { entries, hasMore };
 }
 
 export async function getCoinRule(

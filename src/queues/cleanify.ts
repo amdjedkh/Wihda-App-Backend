@@ -38,7 +38,6 @@ const GEMINI_MODEL = "gemini-2.5-flash-lite";
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 const CONFIDENCE_THRESHOLD = 0.7;
-const SYSTEM_AI_REVIEWER_ID = "SYSTEM_AI";
 
 const SYSTEM_PROMPT = `You are a photo verification assistant for Wihda, a civic neighbourhood application.
 
@@ -69,6 +68,15 @@ Respond ONLY with a valid JSON object — no markdown, no preamble, no extra tex
 }`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
 
 /** Fetch an R2 object and return base64-encoded bytes + inferred MIME type. */
 async function fetchR2AsBase64(
@@ -79,7 +87,7 @@ async function fetchR2AsBase64(
   if (!obj) return null;
 
   const bytes = await obj.arrayBuffer();
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+  const base64 = arrayBufferToBase64(bytes);
 
   const ext = key.split(".").pop()?.toLowerCase() ?? "jpg";
   const mimeMap: Record<string, string> = {
@@ -216,7 +224,7 @@ async function finalizeSubmission(
     .prepare(
       `UPDATE cleanify_submissions
        SET status         = ?,
-           reviewer_id    = ?,
+           reviewer_id    = NULL,
            reviewed_at    = ?,
            review_note    = ?,
            coins_awarded  = ?,
@@ -225,7 +233,6 @@ async function finalizeSubmission(
     )
     .bind(
       status,
-      SYSTEM_AI_REVIEWER_ID,
       now,
       result.rejection_reason ?? null,
       result.approved ? coinAmount : 0,
@@ -254,15 +261,7 @@ async function awardCoins(
          (id, user_id, neighborhood_id, source_type, source_id, amount, category, description, created_at, created_by, status)
          VALUES (?, ?, ?, 'cleanify_approved', ?, ?, 'cleanify', 'Reward for AI-verified cleanify submission', ?, ?, 'valid')`,
       )
-      .bind(
-        id,
-        userId,
-        neighborhoodId,
-        submissionId,
-        amount,
-        now,
-        SYSTEM_AI_REVIEWER_ID,
-      )
+      .bind(id, userId, neighborhoodId, submissionId, amount, now, null)
       .run();
   } catch (err) {
     // Swallow unique-constraint violations — means coins were already awarded
@@ -331,8 +330,7 @@ export async function handleCleanifyQueue(
           rejection_reason:
             "One or more required photos are missing from storage.",
         };
-        const coinAmount = await getCoinRewardAmount(env.DB);
-        await finalizeSubmission(env.DB, submission_id, fallback, coinAmount);
+        await finalizeSubmission(env.DB, submission_id, fallback, 0);
         await env.NOTIFICATION_QUEUE.send({
           user_id,
           type: "cleanify_rejected",
@@ -359,8 +357,7 @@ export async function handleCleanifyQueue(
           rejection_reason:
             "Could not retrieve one or more photos from storage.",
         };
-        const coinAmount = await getCoinRewardAmount(env.DB);
-        await finalizeSubmission(env.DB, submission_id, fallback, coinAmount);
+        await finalizeSubmission(env.DB, submission_id, fallback, 0);
         await env.NOTIFICATION_QUEUE.send({
           user_id,
           type: "cleanify_rejected",
@@ -390,7 +387,7 @@ export async function handleCleanifyQueue(
           env.DB,
           submission_id,
           user_id,
-          neighborhood_id,
+          row.neighborhood_id,
           coinAmount,
         );
       }

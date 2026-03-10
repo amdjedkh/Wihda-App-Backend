@@ -90,15 +90,33 @@ describe("Cleanify Routes", () => {
     mockEnv = createMockEnv();
 
     userToken = await createJWT(
-      { sub: "user-003", role: "user", neighborhood_id: "nb-001" },
+      {
+        sub: "user-003",
+        role: "user",
+        neighborhood_id: "nb-001",
+        verification_status: "verified",
+        scope: "full",
+      },
       mockEnv.JWT_SECRET,
     );
     modToken = await createJWT(
-      { sub: "user-002", role: "moderator", neighborhood_id: "nb-001" },
+      {
+        sub: "user-002",
+        role: "moderator",
+        neighborhood_id: "nb-001",
+        verification_status: "verified",
+        scope: "full",
+      },
       mockEnv.JWT_SECRET,
     );
     noNbToken = await createJWT(
-      { sub: "user-003", role: "user", neighborhood_id: null },
+      {
+        sub: "user-003",
+        role: "user",
+        neighborhood_id: null,
+        verification_status: "verified",
+        scope: "full",
+      },
       mockEnv.JWT_SECRET,
     );
   });
@@ -445,7 +463,10 @@ describe("Cleanify Routes", () => {
   describe("GET /submissions", () => {
     it("returns caller own submissions by default", async () => {
       const subs = [makeSub(), makeSub({ id: "sub-002", status: "approved" })];
-      mockEnv.DB.prepare.mockReturnValueOnce(stmt(null, subs));
+      mockEnv.DB.prepare
+        .mockReturnValueOnce(stmt(null, subs)) // getCleanifySubmissionsForUser
+        .mockReturnValueOnce(stmt(null, [])); // batched users IN query (fetchUsersById)
+      // reviewerIds is empty (all reviewer_id: null) — no second batch query
 
       const res = await cleanify.fetch(
         req("/submissions", { auth: userToken }),
@@ -460,7 +481,9 @@ describe("Cleanify Routes", () => {
 
     it("returns pending_review submissions for moderator", async () => {
       const pending = [makeSub({ status: "pending_review" })];
-      mockEnv.DB.prepare.mockReturnValueOnce(stmt(null, pending));
+      mockEnv.DB.prepare
+        .mockReturnValueOnce(stmt(null, pending)) // getPendingCleanifySubmissions
+        .mockReturnValueOnce(stmt(null, [])); // batched users IN query
 
       const res = await cleanify.fetch(
         req("/submissions?pending=true", { auth: modToken }),
@@ -491,7 +514,9 @@ describe("Cleanify Routes", () => {
   describe("GET /submissions/:id", () => {
     it("returns submission for the owner", async () => {
       const sub = makeSub({ status: "pending_review" });
-      mockEnv.DB.prepare.mockReturnValueOnce(stmt(sub));
+      mockEnv.DB.prepare
+        .mockReturnValueOnce(stmt(sub)) // getCleanifySubmissionById
+        .mockReturnValueOnce(stmt(null)); // user lookup (reviewer_id is null — no second query)
 
       const res = await cleanify.fetch(
         req("/submissions/sub-001", { auth: userToken }),
@@ -695,16 +720,23 @@ describe("Cleanify Routes", () => {
 
   describe("GET /stats", () => {
     it("returns combined neighborhood and user statistics", async () => {
-      const statsRow = {
-        total: 10,
-        approved: 7,
-        pending_review: 2,
-        rejected: 1,
-        user_total: 3,
-        user_approved: 2,
-        user_coins: 300,
-      };
-      mockEnv.DB.prepare.mockReturnValueOnce(stmt(statsRow));
+      // Handler runs 3 parallel queries:
+      //   1. nbStats  — neighborhood submission counts
+      //   2. coinsRow — total coins awarded in neighborhood
+      //   3. userStats — caller's personal counts
+      mockEnv.DB.prepare
+        .mockReturnValueOnce(
+          stmt({
+            total: 10,
+            approved: 7,
+            pending_review: 2,
+            rejected: 1,
+            in_progress: 0,
+            expired: 0,
+          }),
+        )
+        .mockReturnValueOnce(stmt({ total: 1050 }))
+        .mockReturnValueOnce(stmt({ total: 3, approved: 2, coins: 300 }));
 
       const res = await cleanify.fetch(
         req("/stats", { auth: userToken }),
@@ -715,6 +747,10 @@ describe("Cleanify Routes", () => {
 
       expect(res.status).toBe(200);
       expect(data.data.neighborhood.total_submissions).toBe(10);
+      expect(data.data.neighborhood.approved).toBe(7);
+      expect(data.data.neighborhood.total_coins_awarded).toBe(1050);
+      expect(data.data.user.approved).toBe(2);
+      expect(data.data.user.coins_earned).toBe(300);
     });
 
     it("returns NEIGHBORHOOD_REQUIRED when no neighborhood context", async () => {

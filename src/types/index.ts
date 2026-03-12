@@ -35,6 +35,8 @@ export interface Env {
   TWILIO_ACCOUNT_SID: string;
   TWILIO_AUTH_TOKEN: string;
   TWILIO_PHONE_NUMBER: string;
+
+  JINA_API_KEY: string;
 }
 
 // ============================================

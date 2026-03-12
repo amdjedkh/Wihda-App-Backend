@@ -108,6 +108,7 @@ GEMINI_API_KEY = ""
 INTERNAL_WEBHOOK_SECRET = "ahlelele-ahlelas"
 RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
 TWILIO_PHONE_NUMBER = "+1XXXXXXXXXX" 
+JINA_API_KEY = "key"
 
 # Production overrides
 [env.production]

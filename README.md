@@ -156,10 +156,13 @@ Must be completed **after** contact verification. Uses the `restricted_token` fr
 
 - `GET /v1/me` - Get own profile (neighborhood, coins, verification status).
 - `PATCH /v1/me` - Update own profile.
-- `GET /v1/me/coins` - Own coin balance and transaction ledger.
+- `GET /v1/me/coins` - Own coin balance and valid transaction ledger (paginated, cursor-based).
+- `GET /v1/me/coins/history` - Full coin history including voided entries (audit trail).
 - `GET /v1/me/:userId` - Get another user's profile. Response is **role-scoped**:
   - **Regular users** receive basic public info (display name, neighborhood, join date).
   - **Moderators / Admins** receive extended info (verification status, coin balance, submission history, flags).
+- `POST /v1/me/:userId/coins/:entryId/void` - Void a coin ledger entry. Requires a `reason`. **Admin only.**
+- `POST /v1/me/:userId/coins/adjust` - Create a manual coin adjustment (positive or negative). **Admin only.**
 
 ### Neighborhoods
 
@@ -210,8 +213,10 @@ No authentication required. Rate limited to 5 submissions per IP per hour.
 
 ### Campaigns
 
-- `GET /v1/campaigns` - List campaigns for the user's neighborhood.
-- `GET /v1/campaigns/:id` - Get campaign details.
+- `GET /v1/campaigns` - List campaigns for the user's neighborhood. Scoped to caller's neighborhood.
+- `GET /v1/campaigns/:id` - Get campaign details. Returns 404 for campaigns outside the caller's neighborhood.
+
+Campaigns are populated automatically every 12 hours by a cron job that scrapes [cra.dz](https://cra.dz/) via Jina AI Reader and extracts structured events using Gemini. No manual submission is required.
 
 ### Uploads
 
@@ -254,6 +259,7 @@ Create a `.dev.vars` file in the project root (never commit this):
 JWT_SECRET=your-local-secret
 FCM_SERVER_KEY=your-fcm-key
 GEMINI_API_KEY=your-gemini-key
+JINA_API_KEY=your-jina-key
 INTERNAL_WEBHOOK_SECRET=your-internal-secret
 RESEND_API_KEY=re_xxxxxxxxxxxx
 RESEND_FROM_EMAIL=Wihda <onboarding@resend.dev>
@@ -327,6 +333,7 @@ After creating resources, update `wrangler.toml` with the generated IDs.
 wrangler secret put JWT_SECRET
 wrangler secret put FCM_SERVER_KEY
 wrangler secret put GEMINI_API_KEY
+wrangler secret put JINA_API_KEY
 wrangler secret put INTERNAL_WEBHOOK_SECRET
 wrangler secret put RESEND_API_KEY
 wrangler secret put TWILIO_ACCOUNT_SID
@@ -347,6 +354,7 @@ wrangler secret put TWILIO_AUTH_TOKEN
 | `TWILIO_ACCOUNT_SID`      | Twilio Account SID for SMS OTP delivery                                                 |
 | `TWILIO_AUTH_TOKEN`       | Twilio Auth Token                                                                       |
 | `TWILIO_PHONE_NUMBER`     | Twilio sender number in E.164 format (e.g. `+12015551234`)                              |
+| `JINA_API_KEY`            | Jina AI API key for web scraping via the Jina Reader API (campaigns cron job)           |
 
 ## Key Design Notes
 

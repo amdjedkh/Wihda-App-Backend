@@ -1,73 +1,24 @@
 /**
- * Wihda Backend - Campaign Ingestion Queue Consumer
- * Handles scheduled campaign ingestion and expiration
+ * Wihda Backend - Campaign Queue Consumer & Scheduled Scraper
+ *
+ * Exports:
+ *   handleCampaignQueue              - processes wihda-campaign-queue messages
+ *   handleScheduledCampaignIngestion - called by the cron scheduled() handler
+ *
+ * Flow:
+ *   1. Expire campaigns not seen in 72 h
+ *   2. Fetch all active neighborhoods
+ *   3. Scrape cra.dz once via Jina AI Reader -> clean markdown
+ *   4. Extract structured events with Gemini
+ *   5. Upsert each event into every active neighborhood
+ *
+ * No coins, no push notifications - campaigns are read-only enrichment.
  */
 
-import type { Env, CampaignQueueMessage } from '../types';
-import { createOrUpdateCampaign, expireOldCampaigns } from '../lib/db';
-import { toISODateString } from '../lib/utils';
+import type { Env, CampaignQueueMessage } from "../types";
+import { createOrUpdateCampaign, expireOldCampaigns } from "../lib/db";
 
-/**
- * Sample campaign data sources
- * In production, this would fetch from real external APIs or scrape websites
- */
-const CAMPAIGN_SOURCES = {
-  // Municipal API
-  'municipal_api': {
-    fetch: async (_neighborhoodId: string): Promise<IngestCampaign[]> => {
-      // Simulated API response
-      return [
-        {
-          title: 'Fête de Quartier',
-          description: 'Journée festive pour tous les habitants du quartier',
-          organizer: 'Municipalité',
-          location: 'Place centrale',
-          start_dt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-          end_dt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000 + 6 * 60 * 60 * 1000).toISOString(),
-          url: 'https://municipality.example/events/fete-quartier',
-          external_id: 'municipal-001'
-        }
-      ];
-    }
-  },
-  
-  // NGO/Association feed
-  'ngo_feed': {
-    fetch: async (_neighborhoodId: string): Promise<IngestCampaign[]> => {
-      return [
-        {
-          title: 'Distribution Alimentaire',
-          description: 'Distribution de produits alimentaires pour les familles dans le besoin',
-          organizer: 'Association Solidarité',
-          location: 'Centre Social',
-          start_dt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
-          url: 'https://ngo.example/events/food-dist',
-          external_id: 'ngo-002'
-        }
-      ];
-    }
-  },
-  
-  // Facebook events (simulated)
-  'facebook_events': {
-    fetch: async (_neighborhoodId: string): Promise<IngestCampaign[]> => {
-      return [
-        {
-          title: 'Atelier de Jardinage Urbain',
-          description: 'Apprenez à créer un jardin sur votre balcon',
-          organizer: 'Green City Club',
-          location: 'Bibliothèque Municipale',
-          start_dt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
-          end_dt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000 + 3 * 60 * 60 * 1000).toISOString(),
-          url: 'https://facebook.com/events/123456',
-          external_id: 'fb-003'
-        }
-      ];
-    }
-  }
-};
-
-interface IngestCampaign {
+interface ScrapedEvent {
   title: string;
   description?: string;
   organizer?: string;
@@ -76,149 +27,271 @@ interface IngestCampaign {
   end_dt?: string;
   url?: string;
   image_url?: string;
-  external_id?: string;
 }
 
-/**
- * Ingest campaigns from a specific source
- */
-async function ingestFromSource(
-  env: Env,
-  source: string,
-  neighborhoodId: string
-): Promise<number> {
-  const sourceConfig = CAMPAIGN_SOURCES[source as keyof typeof CAMPAIGN_SOURCES];
-  
-  if (!sourceConfig) {
-    console.error(`Unknown source: ${source}`);
-    return 0;
-  }
-  
-  try {
-    const campaigns = await sourceConfig.fetch(neighborhoodId);
-    let ingested = 0;
-    
-    for (const campaign of campaigns) {
-      try {
-        await createOrUpdateCampaign(env.DB, {
-          neighborhoodId,
-          title: campaign.title,
-          description: campaign.description,
-          organizer: campaign.organizer,
-          location: campaign.location,
-          startDt: campaign.start_dt,
-          endDt: campaign.end_dt,
-          url: campaign.url,
-          source,
-          sourceIdentifier: campaign.external_id
-        });
-        ingested++;
-      } catch (error) {
-        console.error(`Failed to ingest campaign: ${campaign.title}`, error);
-      }
-    }
-    
-    return ingested;
-  } catch (error) {
-    console.error(`Failed to fetch from source ${source}:`, error);
-    return 0;
-  }
-}
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-/**
- * Run full ingestion for all neighborhoods
- */
-async function runFullIngestion(env: Env): Promise<void> {
-  // Get all active neighborhoods
-  const result = await env.DB.prepare('SELECT id FROM neighborhoods WHERE is_active = 1').all<{ id: string }>();
-  const neighborhoods = result.results;
-  
-  for (const neighborhood of neighborhoods) {
-    // Ingest from all configured sources
-    for (const source of Object.keys(CAMPAIGN_SOURCES)) {
-      await env.CAMPAIGN_QUEUE.send({
-        type: 'ingest',
-        source,
-        neighborhood_id: neighborhood.id,
-        timestamp: toISODateString()
-      });
-    }
-  }
-}
+const CRA_DZ_URL = "https://cra.dz/";
+const JINA_READER_BASE = "https://r.jina.ai/";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
+const GEMINI_API_BASE =
+  "https://generativelanguage.googleapis.com/v1beta/models";
 
-/**
- * Expire old campaigns
- */
-async function expireCampaigns(env: Env): Promise<number> {
-  // Get grace period from settings (default 72 hours)
-  const settings = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'campaign_grace_period_hours'")
-    .first<{ value: string }>();
-  
-  const gracePeriod = settings ? parseInt(settings.value) : 72;
-  
-  return await expireOldCampaigns(env.DB, gracePeriod);
-}
+// ─── Queue consumer ───────────────────────────────────────────────────────────
 
-/**
- * Main queue handler for campaign ingestion
- */
 export async function handleCampaignQueue(
   batch: MessageBatch<CampaignQueueMessage>,
-  env: Env
+  env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
-    const msg = message.body;
-    
     try {
-      switch (msg.type) {
-        case 'ingest':
-          if (msg.source && msg.neighborhood_id) {
-            const count = await ingestFromSource(env, msg.source, msg.neighborhood_id);
-            console.log(`Ingested ${count} campaigns from ${msg.source}`);
-          }
-          break;
-          
-        case 'expire_old':
-          const expiredCount = await expireCampaigns(env);
-          console.log(`Expired ${expiredCount} old campaigns`);
-          break;
+      const { type } = message.body;
+
+      if (type === "ingest") {
+        // Scrape cra.dz and upsert into neighborhoods
+        await handleCampaignScrape(env, (message.body as any).neighborhood_id);
+      } else if (type === "expire_old") {
+        // Expire stale campaigns only - no scrape
+        const expired = await expireOldCampaigns(env.DB, 72);
+        console.log(`[campaigns] Expired ${expired} stale campaigns`);
+      } else {
+        console.warn(`[campaigns] Unknown message type: ${type}`);
       }
-      
+
       message.ack();
-    } catch (error) {
-      console.error('Campaign ingestion error:', error);
+    } catch (err) {
+      console.error("[campaigns] Queue message failed:", err);
       message.retry();
     }
   }
 }
 
-/**
- * Scheduled handler for campaign ingestion
- * Runs every 12 hours via cron trigger
- */
-export async function handleScheduledCampaignIngestion(env: Env): Promise<void> {
-  console.log('Running scheduled campaign ingestion...');
-  
-  // Run full ingestion
-  await runFullIngestion(env);
-  
-  // Expire old campaigns
-  await expireCampaigns(env);
-  
-  console.log('Scheduled campaign ingestion complete');
+// ─── Scheduled handler ────────────────────────────────────────────────────────
+
+export async function handleScheduledCampaignIngestion(
+  env: Env,
+): Promise<void> {
+  await handleCampaignScrape(env);
 }
 
-/**
- * Manual ingestion endpoint handler (for testing)
- */
-export async function triggerIngestion(env: Env, neighborhoodId?: string, source?: string): Promise<{ ingested: number }> {
-  if (neighborhoodId && source) {
-    const count = await ingestFromSource(env, source, neighborhoodId);
-    return { ingested: count };
+// ─── Core scrape + upsert ─────────────────────────────────────────────────────
+
+async function handleCampaignScrape(
+  env: Env,
+  scopeNeighborhoodId?: string,
+): Promise<void> {
+  console.log("[campaigns] Starting scrape run");
+
+  // 1. Expire campaigns not seen in 72 hours
+  const expired = await expireOldCampaigns(env.DB, 72);
+  console.log(`[campaigns] Expired ${expired} stale campaigns`);
+
+  // 2. Get active neighborhoods (scoped if queue message specifies one)
+  let neighborhoodQuery = `SELECT id, name FROM neighborhoods WHERE status = 'active'`;
+  const neighborhoodParams: string[] = [];
+  if (scopeNeighborhoodId) {
+    neighborhoodQuery += " AND id = ?";
+    neighborhoodParams.push(scopeNeighborhoodId);
   }
-  
-  // Run full ingestion
-  await runFullIngestion(env);
-  
-  return { ingested: 0 };
+
+  const { results: neighborhoods } = await env.DB.prepare(neighborhoodQuery)
+    .bind(...neighborhoodParams)
+    .all<{ id: string; name: string }>();
+
+  if (neighborhoods.length === 0) {
+    console.log("[campaigns] No active neighborhoods - nothing to do");
+    return;
+  }
+
+  // 3. Scrape cra.dz once - content is national, same for all neighborhoods
+  const events = await scrapeCraDz(env);
+  if (events.length === 0) {
+    console.log("[campaigns] No events extracted from cra.dz");
+    return;
+  }
+
+  console.log(`[campaigns] Extracted ${events.length} events`);
+
+  // 4. Upsert into every active neighborhood
+  let upserted = 0;
+  for (const neighborhood of neighborhoods) {
+    for (const event of events) {
+      try {
+        await createOrUpdateCampaign(env.DB, {
+          neighborhoodId: neighborhood.id,
+          title: event.title,
+          description: event.description,
+          organizer: event.organizer,
+          location: event.location,
+          startDt: event.start_dt,
+          endDt: event.end_dt,
+          url: event.url,
+          source: "scrape",
+          // Best unique key available - url if present, else title
+          sourceIdentifier: event.url ?? event.title,
+        });
+        upserted++;
+      } catch (err) {
+        console.error(
+          `[campaigns] Failed to upsert "${event.title}" for ${neighborhood.name}:`,
+          err,
+        );
+      }
+    }
+  }
+
+  console.log(
+    `[campaigns] Upserted ${upserted} campaign rows across ${neighborhoods.length} neighborhoods`,
+  );
+}
+
+// ─── Jina AI Reader ───────────────────────────────────────────────────────────
+
+async function fetchWithJina(
+  url: string,
+  jinaApiKey: string,
+): Promise<string | null> {
+  const res = await fetch(`${JINA_READER_BASE}${url}`, {
+    headers: {
+      Accept: "text/markdown",
+      Authorization: `Bearer ${jinaApiKey}`,
+      "X-Wait-For-Selector": "body",
+      "X-Timeout": "30",
+    },
+  });
+
+  if (!res.ok) {
+    console.error(
+      `[campaigns] Jina fetch failed: ${res.status} ${res.statusText}`,
+    );
+    return null;
+  }
+
+  const text = await res.text();
+  return text.trim() || null;
+}
+
+// ─── Gemini extraction ────────────────────────────────────────────────────────
+
+async function extractEventsWithGemini(
+  markdown: string,
+  geminiApiKey: string,
+): Promise<ScrapedEvent[]> {
+  const today = new Date().toISOString().split("T")[0];
+
+  const prompt = `You are a structured data extractor. The text below is the Algerian Scouts website (cra.dz) converted to markdown.
+
+Extract all activities, events, or campaigns listed on the page.
+Today's date is ${today}. Include events from the last 30 days and all future events.
+
+Return ONLY a valid JSON array (no markdown fences, no explanation) where each item has:
+{
+  "title": "string (required)",
+  "description": "string or null",
+  "organizer": "string or null - group, team, or wilaya organising it",
+  "location": "string or null - city or venue",
+  "start_dt": "ISO 8601 datetime string e.g. 2025-06-15T00:00:00 (required)",
+  "end_dt": "ISO 8601 datetime string or null",
+  "url": "string or null - full absolute URL to the event page",
+  "image_url": "string or null - full absolute URL to an image"
+}
+
+Rules:
+- Skip any item where you cannot determine a start date.
+- Normalize dates to ISO 8601. Assume UTC+1 (Africa/Algiers) if no timezone given.
+- Only extract what is explicitly on the page - do not invent data.
+- If no events are found return an empty array [].
+
+Page content:
+${markdown.slice(0, 12000)}`;
+
+  const res = await fetch(
+    `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${geminiApiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    console.error(`[campaigns] Gemini error: ${res.status} ${res.statusText}`);
+    return [];
+  }
+
+  const data = (await res.json()) as any;
+  const rawText: string =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+  if (!rawText) {
+    console.error("[campaigns] Gemini returned empty response");
+    return [];
+  }
+
+  // Strip accidental markdown fences
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (!Array.isArray(parsed)) {
+      console.error("[campaigns] Gemini response is not an array");
+      return [];
+    }
+
+    const valid: ScrapedEvent[] = [];
+    for (const item of parsed) {
+      if (typeof item.title !== "string" || !item.title.trim()) continue;
+      if (typeof item.start_dt !== "string" || isNaN(Date.parse(item.start_dt)))
+        continue;
+
+      valid.push({
+        title: item.title.trim(),
+        description: str(item.description),
+        organizer: str(item.organizer),
+        location: str(item.location),
+        start_dt: item.start_dt,
+        end_dt: validDate(item.end_dt),
+        url: validUrl(item.url),
+        image_url: validUrl(item.image_url),
+      });
+    }
+
+    return valid;
+  } catch (err) {
+    console.error(
+      "[campaigns] JSON parse error:",
+      err,
+      "\nRaw:",
+      cleaned.slice(0, 300),
+    );
+    return [];
+  }
+}
+
+// ─── Orchestrate ──────────────────────────────────────────────────────────────
+
+async function scrapeCraDz(env: Env): Promise<ScrapedEvent[]> {
+  const markdown = await fetchWithJina(CRA_DZ_URL, env.JINA_API_KEY);
+  if (!markdown) return [];
+  return extractEventsWithGemini(markdown, env.GEMINI_API_KEY);
+}
+
+// ─── Small helpers ────────────────────────────────────────────────────────────
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function validDate(v: unknown): string | undefined {
+  return typeof v === "string" && !isNaN(Date.parse(v)) ? v : undefined;
+}
+
+function validUrl(v: unknown): string | undefined {
+  return typeof v === "string" && v.startsWith("http") ? v : undefined;
 }

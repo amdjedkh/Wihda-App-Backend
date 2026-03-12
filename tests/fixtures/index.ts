@@ -375,6 +375,7 @@ export function createMockEnv() {
     TWILIO_ACCOUNT_SID: "test-twilio-sid",
     TWILIO_AUTH_TOKEN: "test-twilio-token",
     TWILIO_PHONE_NUMBER: "+10000000000",
+    JINA_API_KEY: "test-jina-key",
 
     MATCHING_QUEUE: createMockQueue(),
     NOTIFICATION_QUEUE: createMockQueue(),

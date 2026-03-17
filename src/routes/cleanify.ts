@@ -888,6 +888,46 @@ cleanify.get("/stats", authMiddleware, async (c) => {
   });
 });
 
+// ─── GET /v1/cleanify/active ──────────────────────────────────────────────────
+/**
+ * Returns the user's current active submission (draft_before or in_progress),
+ * or null if none exists.
+ */
+cleanify.get("/active", authMiddleware, async (c) => {
+  const auth = getAuthContext(c);
+  if (!auth) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  if (!auth.neighborhoodId) return c.json({ success: true, data: { submission: null } });
+
+  await expireStaleSubmissions(c.env.DB, auth.userId, auth.neighborhoodId);
+
+  const active = await getActiveSubmission(c.env.DB, auth.userId, auth.neighborhoodId);
+  return c.json({ success: true, data: { submission: active ?? null } });
+});
+
+// ─── POST /v1/cleanify/:id/abandon ───────────────────────────────────────────
+/**
+ * Abandons a draft_before or in_progress submission owned by the user.
+ */
+cleanify.post("/:id/abandon", authMiddleware, async (c) => {
+  const auth = getAuthContext(c);
+  if (!auth) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+
+  const id = c.req.param("id");
+  const submission = await getCleanifySubmissionById(c.env.DB, id);
+
+  if (!submission) return errorResponse("NOT_FOUND", "Submission not found", 404);
+  if (submission.user_id !== auth.userId) return errorResponse("FORBIDDEN", "Not your submission", 403);
+  if (!["draft_before", "in_progress"].includes(submission.status)) {
+    return errorResponse("INVALID_STATE", "Only active submissions can be abandoned", 400);
+  }
+
+  await c.env.DB.prepare(
+    `UPDATE cleanify_submissions SET status = 'expired', updated_at = datetime('now') WHERE id = ?`
+  ).bind(id).run();
+
+  return c.json({ success: true, data: { abandoned: true } });
+});
+
 // ─── Format helper ────────────────────────────────────────────────────────────
 
 function formatSubmission(

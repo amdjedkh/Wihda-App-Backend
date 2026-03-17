@@ -33,12 +33,12 @@ import {
   createModerationLog,
 } from "../lib/db";
 import { errorResponse, toISODateString, generateId } from "../lib/utils";
+import { checkAndAwardBadges } from "../lib/badges";
 import { createUploadToken } from "../lib/upload-token";
 import {
   authMiddleware,
   getAuthContext,
   requireNeighborhood,
-  requireVerified,
   requireModerator,
 } from "../middleware/auth";
 
@@ -167,7 +167,6 @@ async function expireStaleSubmissions(
 cleanify.post(
   "/start",
   authMiddleware,
-  requireVerified,
   requireNeighborhood,
   async (c) => {
     const auth = getAuthContext(c);
@@ -239,7 +238,6 @@ cleanify.post(
 cleanify.post(
   "/:id/before/presigned-url",
   authMiddleware,
-  requireVerified,
   async (c) => {
     const auth = getAuthContext(c);
     if (!auth)
@@ -303,7 +301,6 @@ cleanify.post(
 cleanify.post(
   "/:id/before/confirm",
   authMiddleware,
-  requireVerified,
   async (c) => {
     const auth = getAuthContext(c);
     if (!auth)
@@ -372,7 +369,6 @@ cleanify.post(
 cleanify.post(
   "/:id/after/presigned-url",
   authMiddleware,
-  requireVerified,
   async (c) => {
     const auth = getAuthContext(c);
     if (!auth)
@@ -467,7 +463,6 @@ cleanify.post(
 cleanify.post(
   "/:id/after/confirm",
   authMiddleware,
-  requireVerified,
   async (c) => {
     const auth = getAuthContext(c);
     if (!auth)
@@ -555,7 +550,7 @@ cleanify.post(
 
 // ─── List submissions ─────────────────────────────────────────────────────────
 
-cleanify.get("/submissions", authMiddleware, requireVerified, async (c) => {
+cleanify.get("/submissions", authMiddleware, async (c) => {
   const auth = getAuthContext(c);
   if (!auth)
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);
@@ -623,7 +618,7 @@ cleanify.get("/submissions", authMiddleware, requireVerified, async (c) => {
 
 // ─── Get single submission ────────────────────────────────────────────────────
 
-cleanify.get("/submissions/:id", authMiddleware, requireVerified, async (c) => {
+cleanify.get("/submissions/:id", authMiddleware, async (c) => {
   const auth = getAuthContext(c);
   if (!auth)
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);
@@ -729,6 +724,9 @@ cleanify.post(
       timestamp: now,
     });
 
+    // Check & award badges after cleanify approval (non-blocking)
+    checkAndAwardBadges(c.env.DB, submission.user_id);
+
     return c.json({
       success: true,
       data: {
@@ -820,7 +818,7 @@ cleanify.post(
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
-cleanify.get("/stats", authMiddleware, requireVerified, async (c) => {
+cleanify.get("/stats", authMiddleware, async (c) => {
   const auth = getAuthContext(c);
   if (!auth)
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);

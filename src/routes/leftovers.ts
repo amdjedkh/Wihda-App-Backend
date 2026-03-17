@@ -31,13 +31,14 @@ import {
   errorResponse,
   addHours,
   toISODateString,
+  generateId,
 } from "../lib/utils";
 import {
   authMiddleware,
   getAuthContext,
   requireNeighborhood,
-  requireVerified,
 } from "../middleware/auth";
+import { checkAndAwardBadges } from "../lib/badges";
 
 const leftovers = new Hono<{ Bindings: Env }>();
 
@@ -92,7 +93,6 @@ const closeMatchSchema = z.object({
 leftovers.post(
   "/offers",
   authMiddleware,
-  requireVerified,
   requireNeighborhood,
   async (c) => {
     const authContext = getAuthContext(c);
@@ -140,6 +140,9 @@ leftovers.post(
         timestamp: toISODateString(),
       });
 
+      // Check & award badges asynchronously (non-blocking)
+      checkAndAwardBadges(c.env.DB, authContext.userId);
+
       return successResponse({
         offer: {
           id: offer.id,
@@ -158,21 +161,15 @@ leftovers.post(
 
 /**
  * GET /v1/leftovers/offers
- * List active offers in user's neighborhood
+ * List active offers — global feed when user has no neighborhood, neighborhood-scoped otherwise.
  */
 leftovers.get(
   "/offers",
   authMiddleware,
-  requireVerified,
-  requireNeighborhood,
   async (c) => {
     const authContext = getAuthContext(c);
-    if (!authContext || !authContext.neighborhoodId) {
-      return errorResponse(
-        "UNAUTHORIZED",
-        "Authentication and neighborhood required",
-        401,
-      );
+    if (!authContext) {
+      return errorResponse("UNAUTHORIZED", "Authentication required", 401);
     }
 
     const rawStatus = c.req.query("status") || "active";
@@ -188,15 +185,16 @@ leftovers.get(
 
     let offers: any[];
     if (rawStatus === "active") {
+      // Pass null when no neighborhood — returns global feed
       offers = await getActiveLeftoverOffers(
         c.env.DB,
-        authContext.neighborhoodId,
+        authContext.neighborhoodId ?? null,
         limit,
       );
     } else {
       const result = await c.env.DB.prepare(
         `
-      SELECT * FROM leftover_offers 
+      SELECT * FROM leftover_offers
       WHERE user_id = ?
       ORDER BY created_at DESC LIMIT ?
     `,
@@ -244,7 +242,7 @@ leftovers.get(
  * GET /v1/leftovers/offers/:id
  * Get offer details
  */
-leftovers.get("/offers/:id", authMiddleware, requireVerified, async (c) => {
+leftovers.get("/offers/:id", authMiddleware, async (c) => {
   const id = c.req.param("id");
 
   const offer = await getLeftoverOfferById(c.env.DB, id);
@@ -281,7 +279,6 @@ leftovers.get("/offers/:id", authMiddleware, requireVerified, async (c) => {
 leftovers.post(
   "/needs",
   authMiddleware,
-  requireVerified,
   requireNeighborhood,
   async (c) => {
     const authContext = getAuthContext(c);
@@ -340,21 +337,15 @@ leftovers.post(
 
 /**
  * GET /v1/leftovers/needs
- * List active needs in user's neighborhood
+ * List active needs — global feed when user has no neighborhood, neighborhood-scoped otherwise.
  */
 leftovers.get(
   "/needs",
   authMiddleware,
-  requireVerified,
-  requireNeighborhood,
   async (c) => {
     const authContext = getAuthContext(c);
-    if (!authContext || !authContext.neighborhoodId) {
-      return errorResponse(
-        "UNAUTHORIZED",
-        "Authentication and neighborhood required",
-        401,
-      );
+    if (!authContext) {
+      return errorResponse("UNAUTHORIZED", "Authentication required", 401);
     }
 
     const rawStatus = c.req.query("status") || "active";
@@ -370,15 +361,16 @@ leftovers.get(
 
     let needs: any[];
     if (rawStatus === "active") {
+      // Pass null when no neighborhood — returns global feed
       needs = await getActiveLeftoverNeeds(
         c.env.DB,
-        authContext.neighborhoodId,
+        authContext.neighborhoodId ?? null,
         limit,
       );
     } else {
       const result = await c.env.DB.prepare(
         `
-      SELECT * FROM leftover_needs 
+      SELECT * FROM leftover_needs
       WHERE user_id = ?
       ORDER BY created_at DESC LIMIT ?
     `,
@@ -420,10 +412,103 @@ leftovers.get(
 );
 
 /**
+ * POST /v1/leftovers/offers/:id/favorite
+ * Toggle favorite status for an offer
+ */
+leftovers.post("/offers/:id/favorite", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  const offerId = c.req.param("id");
+
+  // Check if favorite already exists
+  const existing = await c.env.DB.prepare(
+    "SELECT id FROM user_favorites WHERE user_id = ? AND item_type = 'offer' AND item_id = ?"
+  )
+    .bind(authContext.userId, offerId)
+    .first<{ id: string }>();
+
+  if (existing) {
+    // Unfavorite
+    await c.env.DB.prepare(
+      "DELETE FROM user_favorites WHERE user_id = ? AND item_type = 'offer' AND item_id = ?"
+    )
+      .bind(authContext.userId, offerId)
+      .run();
+    return successResponse({ favorited: false });
+  } else {
+    // Favorite
+    const id = generateId();
+    await c.env.DB.prepare(
+      "INSERT INTO user_favorites (id, user_id, item_type, item_id) VALUES (?, ?, 'offer', ?)"
+    )
+      .bind(id, authContext.userId, offerId)
+      .run();
+    return successResponse({ favorited: true });
+  }
+});
+
+/**
+ * GET /v1/leftovers/favorites
+ * List user's favorited offers
+ */
+leftovers.get("/favorites", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  const limit = Math.min(parseInt(c.req.query("limit") || "20"), 100);
+
+  const result = await c.env.DB.prepare(
+    `SELECT lo.* FROM leftover_offers lo
+     INNER JOIN user_favorites uf ON uf.item_id = lo.id AND uf.item_type = 'offer'
+     WHERE uf.user_id = ?
+     ORDER BY uf.created_at DESC LIMIT ?`
+  )
+    .bind(authContext.userId, limit)
+    .all();
+
+  const offers = result.results as any[];
+
+  const userIds = [...new Set(offers.map((o: any) => o.user_id as string))];
+  const userRows =
+    userIds.length > 0
+      ? ((
+          await c.env.DB.prepare(
+            `SELECT id, display_name FROM users WHERE id IN (${userIds.map(() => "?").join(",")})`
+          )
+            .bind(...userIds)
+            .all()
+        ).results as { id: string; display_name: string }[])
+      : [];
+  const userMap = Object.fromEntries(userRows.map((u) => [u.id, u]));
+
+  const offersWithUser = offers.map((offer: any) => {
+    const user = userMap[offer.user_id] ?? null;
+    return {
+      id: offer.id,
+      title: offer.title,
+      description: offer.description,
+      survey: JSON.parse(offer.survey_json),
+      quantity: offer.quantity,
+      status: offer.status,
+      expiry_at: offer.expiry_at,
+      user: user ? { id: user.id, display_name: user.display_name } : null,
+      created_at: offer.created_at,
+    };
+  });
+
+  return successResponse({ offers: offersWithUser });
+});
+
+/**
  * GET /v1/leftovers/matches
  * Get user's matches
  */
-leftovers.get("/matches", authMiddleware, requireVerified, async (c) => {
+leftovers.get("/matches", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
   if (!authContext) {
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);
@@ -455,6 +540,8 @@ leftovers.get("/matches", authMiddleware, requireVerified, async (c) => {
         closure_type: match.closure_type,
         created_at: match.created_at,
         closed_at: match.closed_at,
+        close_requested_by: (match as any).close_requested_by ?? null,
+        close_requested_at: (match as any).close_requested_at ?? null,
         is_offer_owner: isOfferOwner,
         offer: offer
           ? {
@@ -479,13 +566,152 @@ leftovers.get("/matches", authMiddleware, requireVerified, async (c) => {
 });
 
 /**
+ * POST /v1/leftovers/matches/:id/request-close
+ * Two-step exchange confirmation with 5-minute timer
+ */
+leftovers.post(
+  "/matches/:id/request-close",
+  authMiddleware,
+  async (c) => {
+    const authContext = getAuthContext(c);
+    if (!authContext) {
+      return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+    }
+
+    const matchId = c.req.param("id");
+
+    const match = await getMatchById(c.env.DB, matchId);
+    if (!match) {
+      return errorResponse("NOT_FOUND", "Match not found", 404);
+    }
+
+    // Verify user is part of this match
+    if (
+      match.offer_user_id !== authContext.userId &&
+      match.need_user_id !== authContext.userId
+    ) {
+      return errorResponse("FORBIDDEN", "You are not part of this match", 403);
+    }
+
+    // Check match is still open
+    if (match.status === "closed" || match.status === "cancelled") {
+      return errorResponse("ALREADY_CLOSED", "This match is already closed", 400);
+    }
+
+    const matchAny = match as any;
+    const closeRequestedBy: string | null = matchAny.close_requested_by ?? null;
+    const closeRequestedAt: string | null = matchAny.close_requested_at ?? null;
+    const userId = authContext.userId;
+    const now = new Date();
+
+    if (closeRequestedBy === null) {
+      // First request — store it
+      await c.env.DB.prepare(
+        "UPDATE matches SET close_requested_by = ?, close_requested_at = ? WHERE id = ?"
+      )
+        .bind(userId, now.toISOString(), matchId)
+        .run();
+      return successResponse({
+        status: "pending",
+        message: "Waiting for other user to confirm within 5 minutes",
+      });
+    }
+
+    if (closeRequestedBy === userId) {
+      return errorResponse("ALREADY_REQUESTED", "You have already requested closure, waiting for the other user", 409);
+    }
+
+    // Other user had previously requested — check expiry
+    const requestedAt = closeRequestedAt ? new Date(closeRequestedAt) : null;
+    const elapsedSeconds = requestedAt
+      ? (now.getTime() - requestedAt.getTime()) / 1000
+      : Infinity;
+
+    if (elapsedSeconds > 300) {
+      // Expired — reset to this user's request
+      await c.env.DB.prepare(
+        "UPDATE matches SET close_requested_by = ?, close_requested_at = ? WHERE id = ?"
+      )
+        .bind(userId, now.toISOString(), matchId)
+        .run();
+      return successResponse({
+        status: "pending",
+        message: "Previous request expired, your request is now pending",
+      });
+    }
+
+    // Within 5 minutes — complete the closure with coin awards
+    const [giverRule, receiverRule] = await Promise.all([
+      getCoinRule(c.env.DB, "leftovers_match_closed_giver"),
+      getCoinRule(c.env.DB, "leftovers_match_closed_receiver"),
+    ]);
+
+    const giverAmount = giverRule?.amount || 200;
+    await createCoinEntry(c.env.DB, {
+      userId: match.offer_user_id,
+      neighborhoodId: match.neighborhood_id,
+      sourceType: "leftovers_match_closed_giver",
+      sourceId: match.id,
+      amount: giverAmount,
+      category: "leftovers",
+      description: "Reward for successfully giving leftovers",
+      createdBy: "system",
+    });
+
+    const receiverAmount = receiverRule?.amount || 50;
+    await createCoinEntry(c.env.DB, {
+      userId: match.need_user_id,
+      neighborhoodId: match.neighborhood_id,
+      sourceType: "leftovers_match_closed_receiver",
+      sourceId: match.id,
+      amount: receiverAmount,
+      category: "leftovers",
+      description: "Reward for completing pickup",
+      createdBy: "system",
+    });
+
+    const coinsAwarded = giverAmount + receiverAmount;
+
+    await updateMatchStatus(c.env.DB, matchId, {
+      status: "closed",
+      closedBy: userId,
+      closureType: "successful",
+      coinsAwarded,
+    });
+
+    // Close chat thread
+    const chatThread = await getChatThreadByMatchId(c.env.DB, matchId);
+    if (chatThread) {
+      await c.env.DB.prepare(
+        "UPDATE chat_threads SET status = 'closed', closed_at = ? WHERE id = ?"
+      )
+        .bind(toISODateString(), chatThread.id)
+        .run();
+    }
+
+    // Notify the other party
+    const otherUserId =
+      match.offer_user_id === userId ? match.need_user_id : match.offer_user_id;
+    await c.env.NOTIFICATION_QUEUE.send({
+      user_id: otherUserId,
+      type: "match_closed",
+      title: "Match Completed",
+      body: "The leftover exchange has been completed successfully!",
+      data: { match_id: matchId, closure_type: "successful" },
+      timestamp: toISODateString(),
+    });
+
+    return successResponse({ status: "completed", coins_awarded: coinsAwarded });
+  },
+);
+
+/**
  * POST /v1/leftovers/matches/:id/close
  * Request or confirm match closure
  */
 leftovers.post(
   "/matches/:id/close",
   authMiddleware,
-  requireVerified,
   async (c) => {
     const authContext = getAuthContext(c);
     if (!authContext) {

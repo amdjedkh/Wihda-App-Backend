@@ -36,7 +36,7 @@ const sendMessageSchema = z.object({
  * GET /v1/chats
  * List user's chat threads
  */
-chat.get("/", authMiddleware, requireVerified, async (c) => {
+chat.get("/", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
   if (!authContext) {
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);
@@ -105,7 +105,7 @@ chat.get("/", authMiddleware, requireVerified, async (c) => {
  * GET /v1/chats/:thread_id
  * Get thread metadata
  */
-chat.get("/:thread_id", authMiddleware, requireVerified, async (c) => {
+chat.get("/:thread_id", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
   if (!authContext) {
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);
@@ -170,7 +170,7 @@ chat.get("/:thread_id", authMiddleware, requireVerified, async (c) => {
  * GET /v1/chats/:thread_id/messages
  * Get paginated messages
  */
-chat.get("/:thread_id/messages", authMiddleware, requireVerified, async (c) => {
+chat.get("/:thread_id/messages", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
   if (!authContext) {
     return errorResponse("UNAUTHORIZED", "Authentication required", 401);

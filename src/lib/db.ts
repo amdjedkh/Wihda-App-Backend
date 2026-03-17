@@ -104,6 +104,7 @@ export async function updateUser(
     displayName?: string;
     languagePreference?: string;
     fcmToken?: string;
+    photoUrl?: string;
   },
 ): Promise<User | null> {
   const updates: string[] = [];
@@ -120,6 +121,10 @@ export async function updateUser(
   if (data.fcmToken !== undefined) {
     updates.push("fcm_token = ?");
     values.push(data.fcmToken);
+  }
+  if (data.photoUrl !== undefined) {
+    updates.push("photo_url = ?");
+    values.push(data.photoUrl);
   }
 
   if (updates.length === 0) return getUserById(db, id);
@@ -186,6 +191,97 @@ export async function getNeighborhoodsNearLocation(
       ) * 1000;
 
     return distance <= n.radius_meters;
+  });
+}
+
+export async function getAllActiveNeighborhoods(
+  db: D1Database,
+): Promise<Neighborhood[]> {
+  const result = await db
+    .prepare("SELECT * FROM neighborhoods WHERE is_active = 1 ORDER BY created_at DESC")
+    .all<Neighborhood>();
+  return result.results;
+}
+
+export async function createNeighborhood(
+  db: D1Database,
+  data: {
+    name: string;
+    description?: string;
+    color?: string;
+    center_lat: number;
+    center_lng: number;
+    radius_meters: number;
+    city: string;
+    country?: string;
+    created_by: string;
+  },
+): Promise<Neighborhood> {
+  const id = generateId();
+  const now = toISODateString();
+  const color = data.color || '#14ae5c';
+  const country = data.country || 'DZ';
+
+  await db
+    .prepare(
+      `INSERT INTO neighborhoods
+        (id, name, description, color, center_lat, center_lng, radius_meters, city, country, created_by, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    )
+    .bind(
+      id,
+      data.name,
+      data.description ?? null,
+      color,
+      data.center_lat,
+      data.center_lng,
+      data.radius_meters,
+      data.city,
+      country,
+      data.created_by,
+      now,
+      now,
+    )
+    .run();
+
+  return {
+    id,
+    name: data.name,
+    description: data.description ?? null,
+    color,
+    center_lat: data.center_lat,
+    center_lng: data.center_lng,
+    radius_meters: data.radius_meters,
+    city: data.city,
+    country,
+    geo_polygon: null,
+    created_by: data.created_by,
+    is_active: 1,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+/** Returns all active neighborhoods whose area overlaps with the given circle. */
+export async function getOverlappingNeighborhoods(
+  db: D1Database,
+  lat: number,
+  lng: number,
+  radiusMeters: number,
+): Promise<Neighborhood[]> {
+  const all = await getAllActiveNeighborhoods(db);
+  return all.filter((n) => {
+    if (!n.center_lat || !n.center_lng || !n.radius_meters) return false;
+    const distMeters =
+      Math.sqrt(
+        Math.pow((n.center_lat - lat) * 111000, 2) +
+          Math.pow(
+            (n.center_lng - lng) * 111000 * Math.cos((lat * Math.PI) / 180),
+            2,
+          ),
+      );
+    // Two circles overlap when distance between centers < sum of radii
+    return distMeters < n.radius_meters + radiusMeters;
   });
 }
 
@@ -485,21 +581,34 @@ export async function getLeftoverOfferById(
 
 export async function getActiveLeftoverOffers(
   db: D1Database,
-  neighborhoodId: string,
+  neighborhoodId: string | null,
   limit: number = 20,
 ): Promise<LeftoverOffer[]> {
-  const result = await db
-    .prepare(
-      `
-    SELECT * FROM leftover_offers 
-    WHERE neighborhood_id = ? AND status = 'active' AND expiry_at > datetime('now')
-    ORDER BY created_at DESC LIMIT ?
-  `,
-    )
-    .bind(neighborhoodId, limit)
-    .all<LeftoverOffer>();
-
-  return result.results;
+  if (neighborhoodId) {
+    const result = await db
+      .prepare(
+        `
+      SELECT * FROM leftover_offers
+      WHERE neighborhood_id = ? AND status = 'active' AND expiry_at > datetime('now')
+      ORDER BY created_at DESC LIMIT ?
+    `,
+      )
+      .bind(neighborhoodId, limit)
+      .all<LeftoverOffer>();
+    return result.results;
+  } else {
+    const result = await db
+      .prepare(
+        `
+      SELECT * FROM leftover_offers
+      WHERE status = 'active' AND expiry_at > datetime('now')
+      ORDER BY created_at DESC LIMIT ?
+    `,
+      )
+      .bind(limit)
+      .all<LeftoverOffer>();
+    return result.results;
+  }
 }
 
 export async function updateLeftoverOfferStatus(
@@ -566,21 +675,34 @@ export async function getLeftoverNeedById(
 
 export async function getActiveLeftoverNeeds(
   db: D1Database,
-  neighborhoodId: string,
+  neighborhoodId: string | null,
   limit: number = 20,
 ): Promise<LeftoverNeed[]> {
-  const result = await db
-    .prepare(
-      `
-    SELECT * FROM leftover_needs 
-    WHERE neighborhood_id = ? AND status = 'active'
-    ORDER BY created_at DESC LIMIT ?
-  `,
-    )
-    .bind(neighborhoodId, limit)
-    .all<LeftoverNeed>();
-
-  return result.results;
+  if (neighborhoodId) {
+    const result = await db
+      .prepare(
+        `
+      SELECT * FROM leftover_needs
+      WHERE neighborhood_id = ? AND status = 'active'
+      ORDER BY created_at DESC LIMIT ?
+    `,
+      )
+      .bind(neighborhoodId, limit)
+      .all<LeftoverNeed>();
+    return result.results;
+  } else {
+    const result = await db
+      .prepare(
+        `
+      SELECT * FROM leftover_needs
+      WHERE status = 'active'
+      ORDER BY created_at DESC LIMIT ?
+    `,
+      )
+      .bind(limit)
+      .all<LeftoverNeed>();
+    return result.results;
+  }
 }
 
 export async function updateLeftoverNeedStatus(
@@ -1171,6 +1293,67 @@ export async function createModerationLog(
       data.metadata || null,
       now,
     )
+    .run();
+}
+
+export async function getUserByGoogleId(
+  db: D1Database,
+  googleId: string,
+): Promise<User | null> {
+  const result = await db
+    .prepare("SELECT * FROM users WHERE google_id = ?")
+    .bind(googleId)
+    .first<User>();
+  return result;
+}
+
+export async function createUserWithGoogle(
+  db: D1Database,
+  data: {
+    email: string;
+    googleId: string;
+    displayName: string;
+    photoUrl?: string;
+    languagePreference?: string;
+  },
+): Promise<User> {
+  const id = generateId();
+  const now = toISODateString();
+
+  await db
+    .prepare(
+      `
+    INSERT INTO users (id, email, password_hash, display_name, language_preference, google_id, photo_url, verification_status, email_verified, created_at, updated_at)
+    VALUES (?, ?, '', ?, ?, ?, ?, 'verified', 1, ?, ?)
+  `,
+    )
+    .bind(
+      id,
+      data.email,
+      data.displayName,
+      data.languagePreference || "fr",
+      data.googleId,
+      data.photoUrl || null,
+      now,
+      now,
+    )
+    .run();
+
+  return getUserById(db, id) as Promise<User>;
+}
+
+export async function linkGoogleId(
+  db: D1Database,
+  userId: string,
+  googleId: string,
+  photoUrl?: string,
+): Promise<void> {
+  const now = toISODateString();
+  await db
+    .prepare(
+      "UPDATE users SET google_id = ?, photo_url = COALESCE(photo_url, ?), updated_at = ? WHERE id = ?",
+    )
+    .bind(googleId, photoUrl || null, now, userId)
     .run();
 }
 

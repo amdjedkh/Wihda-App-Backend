@@ -37,6 +37,13 @@ export interface Env {
   TWILIO_PHONE_NUMBER: string;
 
   JINA_API_KEY: string;
+
+  // ── Google OAuth ──────────────────────────────────────────────────────────
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+
+  // ── Frontend URL (used for OAuth redirect) ────────────────────────────────
+  FRONTEND_URL?: string;
 }
 
 // ============================================
@@ -62,6 +69,8 @@ export interface User {
   verification_status: VerificationStatus;
   language_preference: string;
   fcm_token: string | null;
+  photo_url: string | null;
+  google_id: string | null;
   /** 0 | 1 — SQLite boolean; true when the user confirmed their email OTP */
   email_verified: number;
   /** 0 | 1 — SQLite boolean; true when the user confirmed their phone OTP */
@@ -164,9 +173,23 @@ export interface Neighborhood {
   center_lng: number | null;
   radius_meters: number | null;
   geo_polygon: string | null;
+  description: string | null;
+  color: string | null;
+  created_by: string | null;
   is_active: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface CreateNeighborhoodRequest {
+  name: string;
+  description?: string;
+  color?: string;
+  center_lat: number;
+  center_lng: number;
+  radius_meters: number;
+  city: string;
+  country?: string;
 }
 
 export interface UserNeighborhood {

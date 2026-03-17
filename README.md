@@ -1,393 +1,429 @@
-# Wihda Backend - Cloudflare Workers API
+# Wihda — Backend API
 
-A complete backend implementation for the Wihda neighborhood civic application using Cloudflare Workers, D1, R2, and Durable Objects.
+A fully serverless REST API for the Wihda neighborhood community app, built on Cloudflare's developer platform.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Runtime | Cloudflare Workers (TypeScript) |
+| Framework | Hono.js v4 |
+| Database | Cloudflare D1 (SQLite) |
+| File Storage | Cloudflare R2 |
+| Cache / Rate Limiting | Cloudflare KV |
+| Background Jobs | Cloudflare Queues + Cron Triggers |
+| Real-time Chat | Cloudflare Durable Objects (WebSocket) |
+| Email OTP | Resend |
+| SMS OTP | Twilio |
+| AI Review (KYC + Cleanify) | Google Gemini Vision |
+| Campaign Scraping | Jina AI Reader + Gemini |
+| Push Notifications | Firebase Cloud Messaging (FCM) |
+
+---
 
 ## Architecture Overview
 
-This backend implements the full MVP specification with the following Cloudflare services:
+```
+┌──────────────────────────────────────────────┐
+│              Cloudflare Workers              │
+│  ┌─────────────────────────────────────────┐ │
+│  │           Hono.js Router                │ │
+│  │  /v1/auth   /v1/me   /v1/leftovers ...  │ │
+│  └────────────────────┬────────────────────┘ │
+│                       │                      │
+│   ┌───────────────────┼───────────────────┐  │
+│   │        │          │          │        │  │
+│  D1      R2          KV       Queues     DO  │
+│ (DB)  (Files)  (Rate limit)  (Jobs)  (Chat)  │
+└──────────────────────────────────────────────┘
+```
 
-| Component          | Cloudflare Service     | Purpose                              |
-| ------------------ | ---------------------- | ------------------------------------ |
-| API Server         | Workers (TypeScript)   | REST API endpoints at `/v1/*`        |
-| Database           | D1 (SQLite)            | All entities with UUID primary keys  |
-| Object Storage     | R2                     | User photos, chat images             |
-| Background Jobs    | Queues + Cron Triggers | Matching, ingestion, notifications   |
-| Real-time Chat     | Durable Objects        | WebSocket sessions, message ordering |
-| Rate Limiting      | KV                     | Simple counters, flags               |
-| Push Notifications | FCM                    | Via HTTP API from Workers            |
+| Service | Purpose |
+|---|---|
+| **D1** | All persistent data (users, posts, matches, coins, badges, store) |
+| **R2** | Profile photos, KYC documents, Cleanify before/after images |
+| **KV** | Rate limiting counters, short-lived flags |
+| **Queues** | Async AI reviews, matching, notifications, campaign ingestion |
+| **Durable Objects** | WebSocket sessions per chat thread |
+
+---
+
+## Features
+
+- **Authentication** — Signup, login, JWT refresh, Google OAuth 2.0
+- **Contact Verification** — Email and SMS OTP with rate limiting and lockout
+- **Identity Verification (KYC)** — Document upload (ID front/back + selfie) with async Gemini AI review
+- **Neighborhoods** — Create, join, and look up geographic neighborhoods
+- **Leftovers** — Create food offers and needs; auto-matching; favorites; exchange confirmation
+- **Chat** — Per-thread Durable Objects with WebSocket and REST message history
+- **Clean & Earn** — Before/after photo submissions with Gemini AI verification and coin rewards
+- **Campaigns** — Auto-ingested community events via Jina + Gemini cron job (every 12h)
+- **Coins Ledger** — Append-only idempotent coin ledger with admin void/adjust
+- **Badges** — Progress-based badge system (food_saver, active_member, etc.)
+- **Rewards Store** — Purchasable items redeemed with coins
+- **Notifications** — Per-user activity alerts
+- **Profile** — Photo upload to R2, display name, neighborhood, public/private fields
+
+---
 
 ## Project Structure
 
 ```
 .
 ├── migrations/
-│   ├── schema.sql                      # Base database schema
-│   ├── 0002_cleanify_multi_step.sql    # Cleanify multi-step submission tables
-│   ├── 0003_kyc_verification.sql       # KYC verification tables + user backfill
-│   ├── 0004_contact_submissions.sql    # Public contact form submissions
-│   ├── 0005_contact_verification.sql   # OTP email/phone verification table
-│   └── seed.sql                        # Initial seed data
-├── scripts/
-│   └── test-api.sh                     # Manual API smoke tests
+│   ├── 0001_schema.sql                # Base schema — all core tables
+│   ├── 0002_cleanify_multi_step.sql   # Cleanify multi-step submission tables
+│   ├── 0003_kyc_verification.sql      # KYC verification sessions + user backfill
+│   ├── 0004_contact_submissions.sql   # Public contact form table
+│   ├── 0005_contact_verification.sql  # OTP verification table
+│   ├── 0006_neighborhood_creation.sql # Neighborhood creation flow
+│   ├── 0007_profile_photo.sql         # photo_url column on users
+│   ├── 0008_badges.sql                # badges + user_badges tables, seed data
+│   ├── 0009_google_oauth.sql          # google_id column + unique index on users
+│   ├── 0010_store.sql                 # store_items + store_redemptions tables
+│   ├── 0011_favorites.sql             # user_favorites table
+│   ├── 0012_exchange_confirm.sql      # close_requested_by/at on matches
+│   └── seed.sql                       # Initial seed data
 ├── src/
-│   ├── index.ts                        # Main entry point, route mounting
+│   ├── index.ts                       # Entry point, route mounting, queue/cron handlers
 │   ├── types/
-│   │   └── index.ts                    # Shared TypeScript type definitions
+│   │   └── index.ts                   # Shared TypeScript interfaces (User, Env, etc.)
 │   ├── lib/
-│   │   ├── utils.ts                    # JWT, crypto, validation helpers
-│   │   ├── db.ts                       # Database query functions
-│   │   ├── rate-limit.ts               # KV-based rate limiting helpers
-│   │   └── upload-token.ts             # Presigned upload token helpers
+│   │   ├── db.ts                      # All database query functions
+│   │   ├── utils.ts                   # JWT, crypto, UUID, validation helpers
+│   │   ├── rate-limit.ts              # KV-based rate limiting helpers
+│   │   └── upload-token.ts            # R2 presigned upload token helpers
 │   ├── middleware/
-│   │   └── auth.ts                     # authMiddleware, requireVerified, requireModerator, requireAdmin, requireNeighborhood
+│   │   └── auth.ts                    # authMiddleware, requireNeighborhood, requireModerator, requireAdmin
 │   ├── routes/
-│   │   ├── auth.ts                     # /v1/auth/*
-│   │   ├── contact-verification.ts     # /v1/auth/verify/* (OTP email + phone)
-│   │   ├── verification.ts             # /v1/verification/* (KYC)
-│   │   ├── user.ts                     # /v1/me, /v1/users/:userId
-│   │   ├── neighborhood.ts             # /v1/neighborhoods/*
-│   │   ├── leftovers.ts                # /v1/leftovers/*
-│   │   ├── chat.ts                     # /v1/chats/*
-│   │   ├── cleanify.ts                 # /v1/cleanify/*
-│   │   ├── campaigns.ts                # /v1/campaigns/*
-│   │   ├── uploads.ts                  # /v1/uploads/*
-│   │   └── contact.ts                  # /v1/contact
+│   │   ├── auth.ts                    # /v1/auth/* (login, signup, refresh, Google OAuth)
+│   │   ├── contact-verification.ts    # /v1/auth/verify/* (OTP send + confirm)
+│   │   ├── verification.ts            # /v1/verification/* (KYC flow)
+│   │   ├── user.ts                    # /v1/me (profile, photo, coins, badges)
+│   │   ├── neighborhood.ts            # /v1/neighborhoods/*
+│   │   ├── leftovers.ts               # /v1/leftovers/* (offers, needs, matches, favorites)
+│   │   ├── chat.ts                    # /v1/chats/* (threads, messages, WebSocket)
+│   │   ├── cleanify.ts                # /v1/cleanify/* (submissions, presigned URLs, AI review)
+│   │   ├── store.ts                   # /v1/store (list items, redeem)
+│   │   ├── campaigns.ts               # /v1/campaigns/*
+│   │   ├── notifications.ts           # /v1/notifications/*
+│   │   ├── uploads.ts                 # /v1/uploads/*
+│   │   └── contact.ts                 # /v1/contact (public contact form)
 │   ├── queues/
-│   │   ├── matching.ts                 # Match offer/need pairs
-│   │   ├── campaign.ts                 # Campaign ingestion
-│   │   ├── notification.ts             # FCM push notifications
-│   │   ├── verification.ts             # Gemini Vision AI KYC document review
-│   │   └── cleanify.ts                 # Gemini Vision AI cleanify photo review
+│   │   ├── matching.ts                # Offer/need matching algorithm
+│   │   ├── campaign.ts                # Campaign ingestion via Jina + Gemini
+│   │   ├── notification.ts            # FCM push notification dispatch
+│   │   ├── verification.ts            # Gemini Vision KYC document review
+│   │   └── cleanify.ts                # Gemini Vision cleanify photo review
 │   └── durable-objects/
-│       └── ChatThreadDurableObject.ts  # WebSocket chat sessions
-├── tests/
-│   ├── setup.ts
-│   ├── helpers.ts
-│   ├── fixtures/
-│   │   ├── index.ts
-│   │   └── types.ts
-│   ├── integration/
-│   │   └── app.test.ts
-│   ├── routes/
-│   │   ├── auth.test.ts
-│   │   ├── cleanify.test.ts
-│   │   ├── contact.test.ts
-│   │   ├── contact-verification.test.ts
-│   │   ├── leftovers.test.ts
-│   │   ├── user.test.ts
-│   │   └── verification.test.ts
-│   ├── queues/
-│   │   ├── campaign.test.ts
-│   │   ├── cleanify.test.ts
-│   │   ├── matching.test.ts
-│   │   └── notification.test.ts
-│   └── unit/
-│       ├── auth-middleware.test.ts
-│       ├── db.test.ts
-│       ├── rate-limit.test.ts
-│       └── utils.test.ts
-├── wrangler.toml
+│       └── ChatThreadDurableObject.ts # WebSocket sessions + message ordering
+├── tests/                             # Vitest unit + integration tests
+├── wrangler.toml                      # Cloudflare Workers configuration
 ├── package.json
-├── tsconfig.json
-└── vitest.config.ts
+└── tsconfig.json
 ```
 
-## Auth Flow
+---
 
-New users go through three sequential steps before getting full API access:
+## API Reference
 
-```
-Signup
-  └─→ Contact Verification (OTP via email or SMS)
-        └─→ Identity Verification (KYC via Gemini Vision AI)
-              └─→ Full JWT issued on login
-```
+### Authentication — `/v1/auth`
 
-> **Token scopes:** Signup issues a `restricted_token` with scope `verification_only`. This token is valid only for `/v1/auth/verify/*` and `/v1/verification/*` routes. A full-access token is only issued on login after both contact verification and KYC are complete.
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/auth/signup` | Create account. Returns `access_token` + `refresh_token`. |
+| `POST` | `/v1/auth/login` | Login with email/password. Returns tokens. |
+| `POST` | `/v1/auth/refresh` | Refresh access token using refresh token. |
+| `GET` | `/v1/auth/google` | Redirect to Google OAuth consent screen. |
+| `POST` | `/v1/auth/google/callback` | Exchange OAuth code for tokens. |
 
-## Middleware
+### Contact Verification (OTP) — `/v1/auth/verify`
 
-All protected routes pass through the following middleware pipeline, defined in `src/middleware/auth.ts`:
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/auth/verify/email/send` | Send 6-digit OTP to registered email via Resend. |
+| `POST` | `/v1/auth/verify/email/confirm` | Confirm email OTP. |
+| `POST` | `/v1/auth/verify/phone/send` | Send 6-digit OTP via Twilio SMS. |
+| `POST` | `/v1/auth/verify/phone/confirm` | Confirm phone OTP. |
+| `GET` | `/v1/auth/verify/status` | Current contact verification state. |
 
-| Middleware               | Description                                                                                                                                    |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `authMiddleware`         | Validates the Bearer JWT and populates `c.var.auth`. Returns `401` if missing or invalid. Does not enforce verification status.                |
-| `optionalAuthMiddleware` | Same as above but never fails - populates context only when a valid token is present.                                                          |
-| `requireVerified`        | Blocks `verification_only` scoped tokens and users whose `verification_status` is not `verified`. Returns `403`. Chain after `authMiddleware`. |
-| `requireModerator`       | Requires `moderator` or `admin` role. Returns `403`. Chain after `authMiddleware`.                                                             |
-| `requireAdmin`           | Requires `admin` role. Returns `403`. Chain after `authMiddleware`.                                                                            |
-| `requireNeighborhood`    | Requires the user to have a `neighborhood_id` in their token. Returns `400`. Chain after `authMiddleware`.                                     |
+> Rate limited: 3 sends/hour per channel. 5 wrong guesses triggers a 60-minute lockout.
 
-Rate limiting is handled via `src/lib/rate-limit.ts` using KV counters and applied at the route level.
+### Identity Verification (KYC) — `/v1/verification`
 
-## API Endpoints
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/verification/start` | Open or reuse a KYC session. |
+| `POST` | `/v1/verification/presigned-url` | Get R2 upload URL for `front`, `back`, or `selfie`. |
+| `POST` | `/v1/verification/submit` | Submit documents for async Gemini AI review. |
+| `GET` | `/v1/verification/status` | Poll current verification status. |
+| `POST` | `/v1/verification/admin/review` | Manual approve/reject override. **Admin only.** |
 
-### Authentication
+### User — `/v1/me`
 
-- `POST /v1/auth/signup` - Create account. Returns `restricted_token` + `verification_session_id` + `contact_verification_required: true`. No full API access until contact verification and KYC are both complete.
-- `POST /v1/auth/login` - Login. Requires contact verified AND KYC verified status.
-- `POST /v1/auth/refresh` - Refresh access and refresh tokens.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/me` | Own profile (name, photo, neighborhood, coins, verification status). |
+| `PATCH` | `/v1/me` | Update display name, language preference, FCM token. |
+| `POST` | `/v1/me/photo` | Upload profile photo directly (multipart). |
+| `GET` | `/v1/me/coins` | Coin balance + paginated ledger. |
+| `GET` | `/v1/me/badges` | All badges with progress calculated from real activity. |
+| `GET` | `/v1/users/:id` | Another user's public profile. |
 
-### Contact Verification (OTP)
+### Neighborhoods — `/v1/neighborhoods`
 
-Must be completed **before** KYC. Uses the `restricted_token` from signup.
-OTPs are 6 digits, expire in 10 minutes, hashed with SHA-256.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/neighborhoods/lookup` | Search by city or coordinates. |
+| `GET` | `/v1/neighborhoods/:id` | Neighborhood details and stats. |
+| `POST` | `/v1/neighborhoods/join` | Join a neighborhood. |
+| `POST` | `/v1/neighborhoods` | Create a new neighborhood. |
 
-**Rate limits:** max 3 sends per hour, max 5 wrong guesses before 60-minute lockout.
+### Leftovers — `/v1/leftovers`
 
-- `POST /v1/auth/verify/email/send` - Send a 6-digit OTP to the user's registered email via Resend.
-- `POST /v1/auth/verify/email/confirm` - Confirm the email OTP. Sets `email_verified = true`.
-- `POST /v1/auth/verify/phone/send` - Send a 6-digit OTP to the user's registered phone via Twilio SMS.
-- `POST /v1/auth/verify/phone/confirm` - Confirm the phone OTP. Sets `phone_verified = true`.
-- `GET /v1/auth/verify/status` - Returns current contact verification state (email/phone masked in response).
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/leftovers/offers` | Create a food offer. |
+| `GET` | `/v1/leftovers/offers` | List active offers (global or by neighborhood). |
+| `GET` | `/v1/leftovers/offers/:id` | Get a single offer. |
+| `POST` | `/v1/leftovers/needs` | Create a food need/request. |
+| `GET` | `/v1/leftovers/needs` | List active needs. |
+| `GET` | `/v1/leftovers/matches` | List current user's matches. |
+| `POST` | `/v1/leftovers/matches/:id/request-close` | Request exchange confirmation (two-step). |
+| `POST` | `/v1/leftovers/matches/:id/close` | Confirm exchange completion + award coins. |
+| `POST` | `/v1/leftovers/offers/:id/favorite` | Toggle favorite on an offer. |
+| `GET` | `/v1/leftovers/favorites` | List user's favorited offers. |
 
-### Identity Verification (KYC)
+### Chat — `/v1/chats`
 
-Must be completed **after** contact verification. Uses the `restricted_token` from signup.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/chats` | List chat threads for current user. |
+| `GET` | `/v1/chats/:thread_id` | Thread metadata and match info. |
+| `GET` | `/v1/chats/:thread_id/messages` | Paginated message history. |
+| `POST` | `/v1/chats/:thread_id/messages` | Send a message. |
+| `GET` | `/v1/chats/:thread_id/ws` | Upgrade to WebSocket (Durable Object). |
 
-- `POST /v1/verification/start` - Open or reuse a verification session.
-- `POST /v1/verification/presigned-url` - Get R2 upload URL for one document (`front`, `back`, `selfie`).
-- `POST /v1/verification/submit` - Submit documents for Gemini Vision AI review (~1–2 min async).
-- `GET /v1/verification/status` - Poll current verification status.
-- `POST /v1/verification/webhook` - **Internal:** Called by queue consumer with AI result. Protected by `INTERNAL_WEBHOOK_SECRET`.
-- `POST /v1/verification/admin/review` - Manual approve/reject override. **Admin only.**
+### Clean & Earn — `/v1/cleanify`
 
-### User
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/cleanify/start` | Create a new submission draft. |
+| `POST` | `/v1/cleanify/:id/before/presigned-url` | Get R2 upload URL for before photo. |
+| `POST` | `/v1/cleanify/:id/before/confirm` | Confirm before photo; starts 20-min timer. |
+| `POST` | `/v1/cleanify/:id/after/presigned-url` | Get R2 upload URL for after photo (≥20 min after before). |
+| `POST` | `/v1/cleanify/:id/after/confirm` | Confirm after photo; triggers Gemini AI review. |
+| `GET` | `/v1/cleanify/submissions` | List own submissions. |
+| `GET` | `/v1/cleanify/submissions/:id` | Get a single submission. |
+| `POST` | `/v1/cleanify/submissions/:id/approve` | Approve + award coins. **Moderator only.** |
+| `POST` | `/v1/cleanify/submissions/:id/reject` | Reject with note. **Moderator only.** |
 
-- `GET /v1/me` - Get own profile (neighborhood, coins, verification status).
-- `PATCH /v1/me` - Update own profile.
-- `GET /v1/me/coins` - Own coin balance and valid transaction ledger (paginated, cursor-based).
-- `GET /v1/me/coins/history` - Full coin history including voided entries (audit trail).
-- `GET /v1/me/:userId` - Get another user's profile. Response is **role-scoped**:
-  - **Regular users** receive basic public info (display name, neighborhood, join date).
-  - **Moderators / Admins** receive extended info (verification status, coin balance, submission history, flags).
-- `POST /v1/me/:userId/coins/:entryId/void` - Void a coin ledger entry. Requires a `reason`. **Admin only.**
-- `POST /v1/me/:userId/coins/adjust` - Create a manual coin adjustment (positive or negative). **Admin only.**
+### Rewards Store — `/v1/store`
 
-### Neighborhoods
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/store` | List store items with coin balance and redemption status. |
+| `POST` | `/v1/store/:id/redeem` | Redeem an item (deducts coins via ledger entry). |
 
-- `GET /v1/neighborhoods/lookup` - Search by city or location.
-- `GET /v1/neighborhoods/:id` - Get neighborhood details.
-- `POST /v1/neighborhoods/join` - Join a neighborhood.
-- `GET /v1/neighborhoods/:id/stats` - Neighborhood statistics.
+### Campaigns — `/v1/campaigns`
 
-### Leftovers
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/campaigns` | List campaigns for the user's neighborhood. |
+| `GET` | `/v1/campaigns/:id` | Get campaign details. |
 
-- `POST /v1/leftovers/offers` - Create a food offer.
-- `GET /v1/leftovers/offers` - List active offers.
-- `POST /v1/leftovers/needs` - Create a food need.
-- `GET /v1/leftovers/needs` - List active needs.
-- `GET /v1/leftovers/matches` - List the current user's matches.
-- `POST /v1/leftovers/matches/:id/close` - Close a match.
+> Auto-populated every 12 hours via cron: Jina scrapes community event sources, Gemini extracts structured data.
 
-### Chat
+### Notifications — `/v1/notifications`
 
-- `GET /v1/chats` - List chat threads for the current user.
-- `GET /v1/chats/:thread_id` - Thread metadata.
-- `GET /v1/chats/:thread_id/messages` - Paginated message history.
-- `POST /v1/chats/:thread_id/messages` - Send a message.
-- `GET /v1/chats/:thread_id/ws` - WebSocket endpoint (upgrades to Durable Object connection).
-
-### Cleanify
-
-- `POST /v1/cleanify/start` - Create a new submission draft. Returns `submission_id`.
-- `POST /v1/cleanify/:id/before/presigned-url` - Get a presigned R2 upload URL for the **before** photo.
-- `POST /v1/cleanify/:id/before/confirm` - Confirm before photo upload; opens the 20-minute time gate.
-- `POST /v1/cleanify/:id/after/presigned-url` - Get a presigned R2 upload URL for the **after** photo. Enforces ≥20 min since before photo and ≤48 hr total window.
-- `POST /v1/cleanify/:id/after/confirm` - Confirm after photo upload; triggers async AI photo verification via Gemini Vision. Sets status to `pending_review`.
-- `GET /v1/cleanify/submissions` - List own submissions. Moderators may pass `?pending=true` to see the review queue.
-- `GET /v1/cleanify/submissions/:id` - Get a single submission (owner or moderator).
-- `POST /v1/cleanify/submissions/:id/approve` - Approve and award coins. **Moderator only.**
-- `POST /v1/cleanify/submissions/:id/reject` - Reject with a required note. **Moderator only.**
-- `GET /v1/cleanify/stats` - Submission statistics for the user's neighborhood and themselves.
-
-Submissions are automatically reviewed by Gemini Vision AI, which checks that both photos show the same location with a visible improvement in cleanliness. Moderator `approve`/`reject` endpoints remain available as manual overrides.
-
-### Contact (Public)
-
-No authentication required. Rate limited to 5 submissions per IP per hour.
-
-- `POST /v1/contact` - Submit a citizen or partner form. Payload is a discriminated union on `type`:
-  - **`citizen`** - requires `name`, `email`, `topic` (`account | bug | feedback | other`), `message`
-  - **`partner`** - requires `organization`, `contactPerson`, `email`, `proposal`
-
-### Campaigns
-
-- `GET /v1/campaigns` - List campaigns for the user's neighborhood. Scoped to caller's neighborhood.
-- `GET /v1/campaigns/:id` - Get campaign details. Returns 404 for campaigns outside the caller's neighborhood.
-
-Campaigns are populated automatically every 12 hours by a cron job that scrapes [cra.dz](https://cra.dz/) via Jina AI Reader and extracts structured events using Gemini. No manual submission is required.
-
-### Uploads
-
-- `POST /v1/uploads/presigned-url` - Get a presigned R2 upload URL.
-- `POST /v1/uploads/direct` - Direct upload (small files).
-- `GET /v1/uploads/:key` - Serve a file from R2.
-- `DELETE /v1/uploads/:key` - Delete a file.
-
-### Notifications
-
-- `GET /v1/notifications` - List notifications for the current user.
-- `POST /v1/notifications/read` - Mark notifications as read.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/notifications` | List notifications for current user. |
+| `POST` | `/v1/notifications/read` | Mark notifications as read. |
 
 ### System
 
-- `GET /health` - Health check.
-- `GET /openapi.json` - OpenAPI spec.
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Health check. |
 
-## Development
+---
+
+## Local Development
 
 ### Prerequisites
 
 - Node.js 18+
 - Wrangler CLI: `npm install -g wrangler`
 - Cloudflare account
-- Resend account (email OTP delivery)
-- Twilio account (SMS OTP delivery)
 
-### Setup
+### Install & Run
 
 ```bash
 npm install
+npm run dev
 ```
 
-### Local Development
+Server runs at `http://localhost:8787`.
 
-Create a `.dev.vars` file in the project root (never commit this):
+### Environment Variables (local)
+
+Create a `.dev.vars` file in the project root — **never commit this file**:
 
 ```
-JWT_SECRET=your-local-secret
-FCM_SERVER_KEY=your-fcm-key
+JWT_SECRET=any-random-secret-for-local-dev
 GEMINI_API_KEY=your-gemini-key
-JINA_API_KEY=your-jina-key
-INTERNAL_WEBHOOK_SECRET=your-internal-secret
+INTERNAL_WEBHOOK_SECRET=any-random-secret
 RESEND_API_KEY=re_xxxxxxxxxxxx
 RESEND_FROM_EMAIL=Wihda <onboarding@resend.dev>
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_PHONE_NUMBER=+1XXXXXXXXXX
+FCM_SERVER_KEY=your-fcm-key
+JINA_API_KEY=your-jina-key
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+FRONTEND_URL=http://localhost:5173
 ```
 
-> **Resend sandbox:** Use `onboarding@resend.dev` as the sender until your domain is verified in Resend. Sandbox can only deliver to the email you signed up with.
+> **Dev mode:** If `RESEND_API_KEY` or Twilio credentials are missing, OTPs are printed to the console instead of being sent. No external API calls are made.
 
-> **Twilio trial:** Can only send SMS to verified caller IDs (the number you verified when signing up).
+### Database
 
 ```bash
-# Start local development server
-npm run dev
-
-# Run database migrations locally
+# Apply all migrations locally
 npm run db:migrate
 
 # Seed test data
 npm run db:seed
 ```
 
-### Testing
+---
+
+## Production Deployment
+
+### 1. Create Cloudflare Resources
 
 ```bash
-npm test
+npx wrangler login
+
+npx wrangler d1 create wihda-db
+npx wrangler kv namespace create KV
+npx wrangler r2 bucket create wihda-uploads
+
+npx wrangler queues create wihda-matching-queue
+npx wrangler queues create wihda-campaign-queue
+npx wrangler queues create wihda-notification-queue
+npx wrangler queues create wihda-verification-queue
+npx wrangler queues create wihda-verification-dlq
+npx wrangler queues create wihda-cleanify-queue
 ```
 
-Tests live in `tests/` and use [Vitest](https://vitest.dev/) with Cloudflare Workers test helpers. The suite covers unit tests, route-level integration tests, and queue consumer tests.
+Copy the returned IDs into `wrangler.toml`.
 
-### Deployment
+### 2. Set Secrets
 
 ```bash
-# Deploy to staging
-npm run deploy:staging
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put INTERNAL_WEBHOOK_SECRET
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put FCM_SERVER_KEY
+npx wrangler secret put JINA_API_KEY
+npx wrangler secret put TWILIO_ACCOUNT_SID
+npx wrangler secret put TWILIO_AUTH_TOKEN
+npx wrangler secret put TWILIO_PHONE_NUMBER
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+```
 
-# Deploy to production
+### 3. Run Remote Migrations
+
+```bash
+npx wrangler d1 migrations apply wihda-db --remote
+```
+
+### 4. Deploy
+
+```bash
 npm run deploy:production
-
-# Run migrations on remote D1
-npm run db:migrate:remote
 ```
 
-### Initial Cloudflare Resource Setup
+The API will be live at `https://wihda-backend-prod.YOUR_SUBDOMAIN.workers.dev`.
 
-```bash
-# D1 database
-wrangler d1 create wihda-db
+---
 
-# KV namespace
-wrangler kv:namespace create KV
+## Environment Variables Reference
 
-# R2 bucket
-wrangler r2 bucket create wihda-uploads
+| Variable | Required | Description |
+|---|---|---|
+| `JWT_SECRET` | ✅ | Secret for signing/verifying JWTs. Must never change after deployment. |
+| `GEMINI_API_KEY` | ✅ | Google Gemini API key. Used for KYC document review and Cleanify photo verification. |
+| `INTERNAL_WEBHOOK_SECRET` | ✅ | Shared secret between queue consumers and the internal webhook endpoint. |
+| `RESEND_API_KEY` | ✅ | Resend API key for email OTP delivery. |
+| `RESEND_FROM_EMAIL` | ✅ | Sender address (e.g. `Wihda <noreply@wihdaapp.com>`). |
+| `TWILIO_ACCOUNT_SID` | ✅ | Twilio Account SID for SMS OTP. |
+| `TWILIO_AUTH_TOKEN` | ✅ | Twilio Auth Token. |
+| `TWILIO_PHONE_NUMBER` | ✅ | Twilio sender number in E.164 format (e.g. `+12015551234`). |
+| `FCM_SERVER_KEY` | ✅ | Firebase Cloud Messaging server key for push notifications. |
+| `JINA_API_KEY` | ✅ | Jina AI Reader API key for campaign web scraping. |
+| `GOOGLE_CLIENT_ID` | Optional | Google OAuth app client ID (required for Google login). |
+| `GOOGLE_CLIENT_SECRET` | Optional | Google OAuth app client secret. |
+| `FRONTEND_URL` | Optional | Frontend origin for OAuth redirects (e.g. `https://app.wihdaapp.com`). |
+| `ENVIRONMENT` | Auto | Set to `development`, `staging`, or `production` via `wrangler.toml`. |
 
-# Queues
-wrangler queues create wihda-matching-queue
-wrangler queues create wihda-campaign-queue
-wrangler queues create wihda-notification-queue
-wrangler queues create wihda-verification-queue
-wrangler queues create wihda-verification-dlq
-wrangler queues create wihda-cleanify-queue
-```
-
-After creating resources, update `wrangler.toml` with the generated IDs.
-
-### Secrets
-
-```bash
-wrangler secret put JWT_SECRET
-wrangler secret put FCM_SERVER_KEY
-wrangler secret put GEMINI_API_KEY
-wrangler secret put JINA_API_KEY
-wrangler secret put INTERNAL_WEBHOOK_SECRET
-wrangler secret put RESEND_API_KEY
-wrangler secret put TWILIO_ACCOUNT_SID
-wrangler secret put TWILIO_AUTH_TOKEN
-```
-
-## Environment Variables
-
-| Variable                  | Description                                                                             |
-| ------------------------- | --------------------------------------------------------------------------------------- |
-| `ENVIRONMENT`             | `development` / `staging` / `production`                                                |
-| `JWT_SECRET`              | Secret used for JWT signing and verification                                            |
-| `FCM_SERVER_KEY`          | Firebase Cloud Messaging server key                                                     |
-| `GEMINI_API_KEY`          | Google Gemini API key (used for KYC document and Cleanify photo review)                 |
-| `INTERNAL_WEBHOOK_SECRET` | Shared secret between the verification queue consumer and the internal webhook endpoint |
-| `RESEND_API_KEY`          | Resend API key for email OTP delivery                                                   |
-| `RESEND_FROM_EMAIL`       | Sender address shown in OTP emails (e.g. `Wihda <noreply@wihda.app>`)                   |
-| `TWILIO_ACCOUNT_SID`      | Twilio Account SID for SMS OTP delivery                                                 |
-| `TWILIO_AUTH_TOKEN`       | Twilio Auth Token                                                                       |
-| `TWILIO_PHONE_NUMBER`     | Twilio sender number in E.164 format (e.g. `+12015551234`)                              |
-| `JINA_API_KEY`            | Jina AI API key for web scraping via the Jina Reader API (campaigns cron job)           |
+---
 
 ## Key Design Notes
 
-### Auth & Verification Pipeline
+### Coins Ledger
 
-Users progress through three gates before receiving full API access. Each gate must be passed in order: contact verification (OTP) -> identity verification (KYC) -> active account. The `restricted_token` issued at signup has scope `verification_only` and cannot be refreshed or used for any other endpoint.
+Coins use an append-only ledger (`coin_ledger_entries`) with a `UNIQUE(source_type, source_id, user_id)` constraint. This makes all coin awards idempotent — retrying an award never double-credits a user. Store redemptions are recorded as negative entries.
 
-### OTP Security
+### Exchange Confirmation (Two-Step)
 
-6-digit codes are generated using `crypto.getRandomValues`. The plaintext code is never stored - only its SHA-256 hash is written to `contact_verifications`. Codes expire after 10 minutes. After 5 consecutive wrong guesses the record is locked for 60 minutes. Resend is rate-limited to 3 codes per hour per channel per user.
-
-### Idempotency
-
-Coin awards use a unique constraint on `(source_type, source_id, user_id)`. Match closures are idempotent via status checks. Contact verification confirm writes are batched (D1 `batch()`) to atomically update both the verification record and the user row.
+When a user requests to close a match, `close_requested_by` and `close_requested_at` are set on the match row. The second party confirming within 5 minutes completes the exchange and triggers coin awards. After 5 minutes the first request expires and must be re-initiated.
 
 ### Matching Algorithm
 
-Offer/need pairs are scored based on food type, dietary constraints, portions, pickup time availability, and proximity. Pairs below a score of `0.4` are discarded. Matching is event-driven via the `wihda-matching-queue` and a scheduled cron trigger.
+Offer/need pairs are scored on food type compatibility, dietary constraints, portions requested vs. available, pickup time overlap, and geographic proximity. Pairs scoring below `0.4` are discarded. Matching runs event-driven via queue on new offer/need creation, and on a scheduled cron.
 
 ### Real-time Chat
 
-Each chat thread has a dedicated Durable Object instance. Clients connect via WebSocket. Messages are persisted to D1 and broadcast to all connected sessions. Read receipts are tracked per-user per-thread.
+Each chat thread has a dedicated Durable Object instance. Clients connect via WebSocket for real-time messaging. Messages are persisted to D1 and broadcast to all connected sessions. The REST endpoints (`GET /messages`, `POST /messages`) are available as a polling fallback.
 
-### Anti-abuse
+### OTP Security
 
-Rate limiting is enforced via KV counters at the route level. Pair repetition is tracked to prevent gaming the matching system. All moderation actions (approve/reject) are written to an audit log.
+6-digit codes are generated with `crypto.getRandomValues`. The plaintext code is never stored — only its SHA-256 hash is written to the DB. Codes expire after 10 minutes. After 5 consecutive wrong guesses the record is locked for 60 minutes.
 
-## Monitoring
+### AI Review Pipeline
 
-```bash
-# Tail live logs
-npm run tail
-```
+Both KYC and Cleanify use the same async pattern:
+1. Frontend uploads files directly to R2 via presigned URL
+2. Backend enqueues a review job
+3. Queue consumer calls Gemini Vision with the R2 object URLs
+4. Result is written back via internal webhook
+5. Frontend polls `/status` until complete
+
+---
+
+## Available Scripts
+
+| Command | Description |
+|---|---|
+| `npm run dev` | Start local dev server with Wrangler |
+| `npm run build` | TypeScript compile check |
+| `npm run deploy:production` | Deploy to production environment |
+| `npm run deploy:staging` | Deploy to staging environment |
+| `npm run db:migrate` | Apply migrations to local D1 |
+| `npm run db:migrate:remote` | Apply migrations to remote D1 |
+| `npm run db:seed` | Seed local DB with test data |
+| `npm run tail` | Tail live production logs |
+| `npm test` | Run Vitest test suite |
+
+---
 
 ## License
 

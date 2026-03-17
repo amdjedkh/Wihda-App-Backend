@@ -109,11 +109,12 @@ export async function optionalAuthMiddleware(
 // ─── Role / verification guards ───────────────────────────────────────────────
 
 /**
- * Requires the user to have completed KYC.
- * Chain AFTER authMiddleware.
+ * Requires the user to have a full-scope token (i.e. completed contact
+ * verification via OTP).  KYC is OPTIONAL — we no longer gate the whole
+ * app behind it.  The only thing blocked here is a raw verification_only
+ * token that was issued at signup before the OTP step.
  *
- * Also blocks 'verification_only' scoped tokens — those are only valid for
- * /v1/verification/* routes.
+ * Chain AFTER authMiddleware.
  */
 export async function requireVerified(
   c: Context<{ Bindings: Env }>,
@@ -129,16 +130,7 @@ export async function requireVerified(
     return unauthorizedResponse(
       c,
       "VERIFICATION_TOKEN_RESTRICTED",
-      "This token can only be used for verification endpoints. Complete identity verification first.",
-      403,
-    );
-  }
-
-  if (auth.verificationStatus !== "verified") {
-    return unauthorizedResponse(
-      c,
-      "VERIFICATION_REQUIRED",
-      "Identity verification is required to access this resource.",
+      "Please complete contact verification (OTP) first.",
       403,
     );
   }

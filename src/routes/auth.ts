@@ -15,6 +15,9 @@ import {
   getUserById,
   getUserNeighborhood,
   createVerificationSession,
+  getUserByGoogleId,
+  createUserWithGoogle,
+  linkGoogleId,
 } from "../lib/db";
 import {
   hashPassword,
@@ -246,48 +249,6 @@ auth.post("/login", async (c) => {
       );
     }
 
-    // ── KYC gate ──────────────────────────────────────────────────────────────
-    if (user.verification_status !== "verified") {
-      const canRetry =
-        user.verification_status === "unverified" ||
-        user.verification_status === "pending" ||
-        user.verification_status === "failed";
-
-      const message =
-        user.verification_status === "unverified" ||
-        user.verification_status === "pending"
-          ? "Your identity has not been verified yet. Please complete the verification process."
-          : "Your verification was rejected. Please contact support or retry.";
-
-      const details: Record<string, unknown> = {
-        verification_status: user.verification_status,
-      };
-
-      if (canRetry) {
-        const restrictedToken = await createJWT(
-          {
-            sub: user.id,
-            role: user.role,
-            neighborhood_id: null,
-            verification_status: user.verification_status,
-            scope: "verification_only",
-          },
-          c.env.JWT_SECRET,
-          24,
-        );
-        details.restricted_token = restrictedToken;
-        details.expires_in = 86400;
-      }
-
-      return c.json(
-        {
-          success: false,
-          error: { code: "VERIFICATION_REQUIRED", message, details },
-        },
-        403,
-      );
-    }
-
     const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
 
     const tokenPayload = {
@@ -403,14 +364,9 @@ auth.post("/refresh", async (c) => {
       );
     }
 
-    // Re-check KYC in case an admin revoked it since last login
-    if (user.verification_status !== "verified") {
-      return errorResponse(
-        "VERIFICATION_REQUIRED",
-        "Identity verification is required",
-        403,
-      );
-    }
+    // NOTE: KYC (verification_status) is intentionally NOT re-checked here.
+    // KYC is optional — blocking refresh for non-KYC users would permanently
+    // lock them out of the app after 24 h with no recovery path.
 
     const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
 
@@ -457,6 +413,201 @@ auth.post("/refresh", async (c) => {
   } catch (error) {
     console.error("Refresh error:", error);
     return errorResponse("INTERNAL_ERROR", "Failed to refresh token", 500);
+  }
+});
+
+// ─── GET /v1/auth/google ──────────────────────────────────────────────────────
+
+/**
+ * Redirects the user to Google's OAuth consent screen.
+ * Stores a random state value in KV for CSRF protection (TTL: 10 minutes).
+ */
+auth.get("/google", async (c) => {
+  if (!c.env.GOOGLE_CLIENT_ID) {
+    return errorResponse("NOT_CONFIGURED", "Google OAuth is not configured", 503);
+  }
+
+  const state = crypto.randomUUID();
+  await c.env.KV.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+  const redirectUri = `${c.env.FRONTEND_URL || "http://localhost:5173"}/auth/google/callback`;
+
+  const params = new URLSearchParams({
+    client_id: c.env.GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: "email profile",
+    state,
+    access_type: "offline",
+    prompt: "select_account",
+  });
+
+  return c.redirect(
+    `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+  );
+});
+
+// ─── POST /v1/auth/google/callback ───────────────────────────────────────────
+
+/**
+ * Handles the Google OAuth callback.
+ * Accepts { code, state } as JSON body (sent by the frontend after redirect).
+ * - Verifies state (CSRF check)
+ * - Exchanges code for tokens
+ * - Fetches user info from Google
+ * - Finds or creates a local user
+ * - Returns access + refresh tokens
+ */
+auth.post("/google/callback", async (c) => {
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
+    return errorResponse("NOT_CONFIGURED", "Google OAuth is not configured", 503);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { code, state } = body as { code?: string; state?: string };
+
+    if (!code) {
+      return errorResponse("VALIDATION_ERROR", "Authorization code is required", 400);
+    }
+    if (!state) {
+      return errorResponse("VALIDATION_ERROR", "State parameter is required", 400);
+    }
+
+    // ── CSRF state verification ───────────────────────────────────────────────
+    const storedState = await c.env.KV.get(`oauth_state:${state}`);
+    if (!storedState) {
+      return errorResponse("INVALID_STATE", "Invalid or expired OAuth state", 400);
+    }
+    await c.env.KV.delete(`oauth_state:${state}`);
+
+    // ── Exchange code for Google tokens ───────────────────────────────────────
+    const redirectUri = `${c.env.FRONTEND_URL || "http://localhost:5173"}/auth/google/callback`;
+
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: c.env.GOOGLE_CLIENT_ID,
+        client_secret: c.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      const err = await tokenRes.text();
+      console.error("Google token exchange failed:", err);
+      return errorResponse("OAUTH_ERROR", "Failed to exchange authorization code", 400);
+    }
+
+    const tokenData = (await tokenRes.json()) as {
+      access_token: string;
+      id_token?: string;
+      error?: string;
+    };
+
+    if (tokenData.error) {
+      return errorResponse("OAUTH_ERROR", tokenData.error, 400);
+    }
+
+    // ── Fetch Google user info ────────────────────────────────────────────────
+    const userInfoRes = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      },
+    );
+
+    if (!userInfoRes.ok) {
+      return errorResponse("OAUTH_ERROR", "Failed to fetch Google user info", 400);
+    }
+
+    const googleUser = (await userInfoRes.json()) as {
+      sub: string;
+      email: string;
+      name: string;
+      picture?: string;
+      email_verified?: boolean;
+    };
+
+    if (!googleUser.email) {
+      return errorResponse("OAUTH_ERROR", "Google account has no email address", 400);
+    }
+
+    // ── Find or create local user ─────────────────────────────────────────────
+    let user = await getUserByGoogleId(c.env.DB, googleUser.sub);
+
+    if (!user) {
+      // Try to find by email — link the Google account to existing user
+      user = await getUserByEmail(c.env.DB, googleUser.email);
+      if (user) {
+        await linkGoogleId(c.env.DB, user.id, googleUser.sub, googleUser.picture);
+        user = await getUserById(c.env.DB, user.id);
+      }
+    }
+
+    if (!user) {
+      // Create a brand-new account; Google accounts are pre-verified
+      user = await createUserWithGoogle(c.env.DB, {
+        email: googleUser.email,
+        googleId: googleUser.sub,
+        displayName: googleUser.name || googleUser.email.split("@")[0],
+        photoUrl: googleUser.picture,
+      });
+    }
+
+    if (!user) {
+      return errorResponse("INTERNAL_ERROR", "Failed to resolve user account", 500);
+    }
+
+    // ── Account status gate ───────────────────────────────────────────────────
+    if (user.status === "banned") {
+      return errorResponse("ACCOUNT_BANNED", "Your account has been banned", 403);
+    }
+    if (user.status === "suspended") {
+      return errorResponse("ACCOUNT_SUSPENDED", "Your account has been temporarily suspended", 403);
+    }
+
+    // ── Issue tokens ──────────────────────────────────────────────────────────
+    const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
+
+    const tokenPayload = {
+      sub: user.id,
+      role: user.role,
+      neighborhood_id: userNeighborhood?.neighborhood_id ?? null,
+      verification_status: user.verification_status,
+      scope: "full",
+    };
+
+    const accessToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 24);
+    const refreshToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 168);
+
+    const refreshPayload = await verifyJWT(refreshToken, c.env.JWT_SECRET);
+    if (refreshPayload?.jti) {
+      await c.env.KV.put(refreshTokenKey(refreshPayload.jti), user.id, {
+        expirationTtl: REFRESH_TOKEN_TTL_SECONDS,
+      });
+    }
+
+    const response: LoginResponse = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_in: 86400,
+      user: {
+        id: user.id,
+        display_name: user.display_name,
+        role: user.role,
+        created_at: user.created_at,
+        verification_status: user.verification_status,
+      },
+    };
+
+    return successResponse(response);
+  } catch (error) {
+    console.error("Google OAuth callback error:", error);
+    return errorResponse("INTERNAL_ERROR", "Google authentication failed", 500);
   }
 });
 

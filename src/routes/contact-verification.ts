@@ -62,6 +62,12 @@ async function sendSmsOtp(
   toPhone: string,
   otp: string,
 ): Promise<void> {
+  // In development (no Twilio credentials), just log the OTP
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) {
+    console.log(`[DEV] SMS OTP for ${toPhone}: ${otp}`);
+    return;
+  }
+
   const url = `https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`;
 
   const body = new URLSearchParams({
@@ -97,6 +103,12 @@ async function sendEmailOtp(
   toEmail: string,
   otp: string,
 ): Promise<void> {
+  // In development (no API key set), just log the OTP — no real email sent
+  if (!env.RESEND_API_KEY) {
+    console.log(`[DEV] Email OTP for ${toEmail}: ${otp}`);
+    return;
+  }
+
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -104,13 +116,13 @@ async function sendEmailOtp(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: env.RESEND_FROM_EMAIL, // e.g. "Wihda <noreply@wihdaapp.com>"
+      from: env.RESEND_FROM_EMAIL,
       to: [toEmail],
       subject: "Your Wihda verification code",
       html: `
         <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
           <h2 style="color:#1a1a1a">Verify your email</h2>
-          <p>Use the code below to verify your Wihda account. 
+          <p>Use the code below to verify your Wihda account.
              It expires in <strong>${OTP_EXPIRY_MINUTES} minutes</strong>.</p>
           <div style="font-size:36px;font-weight:bold;letter-spacing:8px;
                       background:#f4f4f5;padding:20px 32px;border-radius:8px;

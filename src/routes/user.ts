@@ -28,6 +28,7 @@ import {
   requireAdmin,
   getAuthContext,
 } from "../middleware/auth";
+import { createUploadToken } from "../lib/upload-token";
 
 const user = new Hono<{ Bindings: Env }>();
 
@@ -35,6 +36,7 @@ const updateProfileSchema = z.object({
   display_name: z.string().min(2).max(50).optional(),
   language_preference: z.string().length(2).optional(),
   fcm_token: z.string().optional(),
+  photo_url: z.string().url().optional(),
 });
 
 /**
@@ -66,6 +68,7 @@ user.get("/", authMiddleware, async (c) => {
     email: currentUser.email,
     phone: currentUser.phone,
     display_name: currentUser.display_name,
+    photo_url: currentUser.photo_url,
     role: currentUser.role,
     status: currentUser.status,
     verification_status: currentUser.verification_status,
@@ -81,6 +84,200 @@ user.get("/", authMiddleware, async (c) => {
     coin_balance: coinBalance,
     created_at: currentUser.created_at,
   });
+});
+
+/**
+ * POST /v1/me/photo
+ * Generate a signed upload URL for a profile photo, then update photo_url after upload.
+ * Accepts multipart/form-data with a `file` field.
+ * Auth required; no requireVerified — unverified users can set a profile photo.
+ */
+user.post("/photo", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  try {
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+
+    if (!file) {
+      return errorResponse("VALIDATION_ERROR", "A 'file' field is required", 400);
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      return errorResponse("FILE_TOO_LARGE", "File size must be less than 10MB", 400);
+    }
+
+    const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+    const allowedExts = ["jpg", "jpeg", "png", "webp"];
+    if (!allowedExts.includes(ext)) {
+      return errorResponse(
+        "VALIDATION_ERROR",
+        "Only jpg, jpeg, png, and webp files are allowed",
+        400,
+      );
+    }
+
+    const timestamp = Date.now();
+    const key = `profiles/${authContext.userId}/photo_${timestamp}.${ext}`;
+
+    const fileBuffer = await file.arrayBuffer();
+    const contentType = file.type || "image/jpeg";
+
+    await c.env.STORAGE.put(key, fileBuffer, {
+      httpMetadata: { contentType },
+      customMetadata: { userId: authContext.userId, contentType: "profile_photo" },
+    });
+
+    const origin = new URL(c.req.url).origin;
+    const photoUrl = `${origin}/v1/uploads/${key}`;
+
+    await updateUser(c.env.DB, authContext.userId, { photoUrl });
+
+    return successResponse({ photo_url: photoUrl, object_key: key });
+  } catch (error) {
+    console.error("Profile photo upload error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to upload profile photo", 500);
+  }
+});
+
+/**
+ * POST /v1/me/photo-url
+ * Generate a presigned upload URL for a profile photo (client uploads directly).
+ * Auth required; no requireVerified.
+ */
+user.post("/photo-url", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const fileExtension = ((body as any).file_extension || "jpg")
+      .toLowerCase()
+      .replace(/^\./, "");
+    const allowedExts = ["jpg", "jpeg", "png", "webp"];
+    if (!allowedExts.includes(fileExtension)) {
+      return errorResponse(
+        "VALIDATION_ERROR",
+        "Only jpg, jpeg, png, and webp files are allowed",
+        400,
+      );
+    }
+
+    const timestamp = Date.now();
+    const key = `profiles/${authContext.userId}/photo_${timestamp}.${fileExtension}`;
+
+    const uploadToken = await createUploadToken(
+      c.env.JWT_SECRET,
+      authContext.userId,
+      key,
+      "profile_photo",
+    );
+
+    const origin = new URL(c.req.url).origin;
+    const uploadUrl = `${origin}/v1/uploads/direct?token=${uploadToken}`;
+    const fileUrl = `${origin}/v1/uploads/${key}`;
+
+    return successResponse({
+      upload_url: uploadUrl,
+      object_key: key,
+      file_url: fileUrl,
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+    });
+  } catch (error) {
+    console.error("Profile photo-url error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to generate upload URL", 500);
+  }
+});
+
+/**
+ * GET /v1/me/badges
+ * Returns all badges with progress and earned status for the current user.
+ * Auth required; no requireVerified.
+ */
+user.get("/badges", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  try {
+    // Fetch all badge definitions
+    const badgesResult = await c.env.DB.prepare(
+      "SELECT * FROM badges ORDER BY requirement_value ASC",
+    ).all<{
+      id: string;
+      key: string;
+      name: string;
+      description: string | null;
+      icon: string;
+      color: string;
+      category: string;
+      requirement_type: string;
+      requirement_value: number;
+    }>();
+
+    // Fetch user's earned badges
+    const earnedResult = await c.env.DB.prepare(
+      "SELECT badge_key, earned_at FROM user_badges WHERE user_id = ?",
+    )
+      .bind(authContext.userId)
+      .all<{ badge_key: string; earned_at: string }>();
+
+    const earnedMap = Object.fromEntries(
+      earnedResult.results.map((ub) => [ub.badge_key, ub.earned_at]),
+    );
+
+    // Count user progress metrics
+    const [leftoverOffersRow, cleanifyApprovedRow] = await Promise.all([
+      c.env.DB.prepare(
+        "SELECT COUNT(*) as cnt FROM leftover_offers WHERE user_id = ?",
+      )
+        .bind(authContext.userId)
+        .first<{ cnt: number }>(),
+      c.env.DB.prepare(
+        "SELECT COUNT(*) as cnt FROM cleanify_submissions WHERE user_id = ? AND status = 'approved'",
+      )
+        .bind(authContext.userId)
+        .first<{ cnt: number }>(),
+    ]);
+
+    const leftoverOffers = leftoverOffersRow?.cnt ?? 0;
+    const cleanifyApproved = cleanifyApprovedRow?.cnt ?? 0;
+    const totalActions = leftoverOffers + cleanifyApproved;
+
+    const progressMap: Record<string, number> = {
+      leftover_offers: leftoverOffers,
+      cleanify_approved: cleanifyApproved,
+      total_actions: totalActions,
+    };
+
+    const badges = badgesResult.results.map((badge) => {
+      const progress = progressMap[badge.requirement_type] ?? 0;
+      const earned = badge.key in earnedMap;
+      return {
+        key: badge.key,
+        name: badge.name,
+        description: badge.description,
+        icon: badge.icon,
+        color: badge.color,
+        category: badge.category,
+        requirement_value: badge.requirement_value,
+        progress,
+        earned,
+        earned_at: earned ? earnedMap[badge.key] : null,
+      };
+    });
+
+    return successResponse({ badges });
+  } catch (error) {
+    console.error("Badges fetch error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to fetch badges", 500);
+  }
 });
 
 /**
@@ -112,6 +309,7 @@ user.patch("/", authMiddleware, requireVerified, async (c) => {
       displayName: data.display_name,
       languagePreference: data.language_preference,
       fcmToken: data.fcm_token,
+      photoUrl: data.photo_url,
     });
 
     if (!updatedUser) {

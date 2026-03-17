@@ -287,7 +287,7 @@ export async function handleCleanifyQueue(
   env: Env,
 ): Promise<void> {
   for (const message of batch.messages) {
-    const { type, submission_id, user_id, neighborhood_id } = message.body;
+    const { type, submission_id, user_id } = message.body;
 
     if (type !== "run_ai_check" || !submission_id || !user_id) {
       console.warn("Unexpected cleanify queue message:", message.body);

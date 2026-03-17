@@ -611,4 +611,168 @@ auth.post("/google/callback", async (c) => {
   }
 });
 
+// ─── Forgot Password helpers ──────────────────────────────────────────────────
+
+const RESET_OTP_TTL = 10 * 60; // 10 minutes in seconds
+
+function resetOtpKey(email: string): string {
+  return `pwd_reset:${email.toLowerCase()}`;
+}
+
+function generateResetOtp(): string {
+  const array = new Uint32Array(1);
+  crypto.getRandomValues(array);
+  return String(array[0] % 1_000_000).padStart(6, "0");
+}
+
+async function sendPasswordResetEmail(env: Env, toEmail: string, otp: string): Promise<void> {
+  if (!env.RESEND_API_KEY) {
+    console.log(`[DEV] Password reset OTP for ${toEmail}: ${otp}`);
+    return;
+  }
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.RESEND_FROM_EMAIL,
+      to: [toEmail],
+      subject: "Reset Your Password",
+      html: `
+        <div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+          <h2 style="color:#1a1a1a">Reset your password</h2>
+          <p>Use the code below to reset your Wihda password.
+             It expires in <strong>10 minutes</strong>.</p>
+          <div style="font-size:36px;font-weight:bold;letter-spacing:8px;
+                      background:#f4f4f5;padding:20px 32px;border-radius:8px;
+                      text-align:center;color:#18181b;margin:24px 0">
+            ${otp}
+          </div>
+          <p style="color:#71717a;font-size:14px">
+            If you didn't request this, you can safely ignore this email.
+            Never share this code with anyone.
+          </p>
+        </div>
+      `,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("Resend error:", res.status, text);
+    throw new Error(`Email send failed: ${res.status}`);
+  }
+}
+
+// ─── POST /v1/auth/forgot-password ───────────────────────────────────────────
+
+auth.post("/forgot-password", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const email = (body.email ?? "").trim().toLowerCase();
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return errorResponse("VALIDATION_ERROR", "Valid email is required", 400);
+    }
+
+    // Always respond with success to avoid user enumeration
+    const user = await getUserByEmail(c.env.DB, email);
+    if (!user) {
+      return successResponse({ message: "If that email exists, a reset code has been sent." });
+    }
+
+    const otp = generateResetOtp();
+    // Store: { otp, used: false } in KV with 10-min TTL
+    await c.env.KV.put(resetOtpKey(email), JSON.stringify({ otp, used: false }), {
+      expirationTtl: RESET_OTP_TTL,
+    });
+
+    await sendPasswordResetEmail(c.env, email, otp);
+
+    return successResponse({ message: "If that email exists, a reset code has been sent." });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to process request", 500);
+  }
+});
+
+// ─── POST /v1/auth/verify-reset-code ─────────────────────────────────────────
+
+auth.post("/verify-reset-code", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const email = (body.email ?? "").trim().toLowerCase();
+    const code = (body.code ?? "").trim();
+
+    if (!email || !code) {
+      return errorResponse("VALIDATION_ERROR", "Email and code are required", 400);
+    }
+
+    const stored = await c.env.KV.get(resetOtpKey(email));
+    if (!stored) {
+      return errorResponse("INVALID_CODE", "Invalid or expired reset code", 400);
+    }
+
+    const { otp, used } = JSON.parse(stored);
+    if (used || otp !== code) {
+      return errorResponse("INVALID_CODE", "Invalid or expired reset code", 400);
+    }
+
+    return successResponse({ valid: true });
+  } catch (error) {
+    console.error("Verify reset code error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to verify code", 500);
+  }
+});
+
+// ─── POST /v1/auth/reset-password ────────────────────────────────────────────
+
+auth.post("/reset-password", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const email = (body.email ?? "").trim().toLowerCase();
+    const code = (body.code ?? "").trim();
+    const newPassword = body.new_password ?? "";
+
+    if (!email || !code || !newPassword) {
+      return errorResponse("VALIDATION_ERROR", "Email, code, and new password are required", 400);
+    }
+    if (newPassword.length < 8) {
+      return errorResponse("VALIDATION_ERROR", "Password must be at least 8 characters", 400);
+    }
+
+    const stored = await c.env.KV.get(resetOtpKey(email));
+    if (!stored) {
+      return errorResponse("INVALID_CODE", "Invalid or expired reset code", 400);
+    }
+
+    const { otp, used } = JSON.parse(stored);
+    if (used || otp !== code) {
+      return errorResponse("INVALID_CODE", "Invalid or expired reset code", 400);
+    }
+
+    const user = await getUserByEmail(c.env.DB, email);
+    if (!user) {
+      return errorResponse("INVALID_CODE", "Invalid or expired reset code", 400);
+    }
+
+    // Hash new password and update
+    const hashed = await hashPassword(newPassword);
+    await c.env.DB.prepare(
+      `UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`
+    ).bind(hashed, user.id).run();
+
+    // Invalidate OTP
+    await c.env.KV.put(resetOtpKey(email), JSON.stringify({ otp, used: true }), {
+      expirationTtl: 60,
+    });
+
+    return successResponse({ message: "Password reset successfully." });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to reset password", 500);
+  }
+});
+
 export default auth;

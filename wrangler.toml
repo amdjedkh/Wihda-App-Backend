@@ -90,25 +90,21 @@ max_retries = 3
 name = "CHAT_DO"
 class_name = "ChatThreadDurableObject"
 
-# Durable Objects migrations
+# Durable Objects migrations (new_sqlite_classes required on free plan)
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatThreadDurableObject"]
+new_sqlite_classes = ["ChatThreadDurableObject"]
 
 # Cron triggers for scheduled jobs
 [triggers]
 crons = ["0 */12 * * *"]  # Every 12 hours for campaign ingestion
 
-# Environment variables (use wrangler secret for sensitive values)
+# Non-sensitive environment variables only.
+# Sensitive values (JWT_SECRET, GEMINI_API_KEY, etc.) must be set with:
+#   wrangler secret put <NAME>
 [vars]
-ENVIRONMENT = "development"
-JWT_SECRET = "dev-jwt-secret-change-in-production"
-FCM_SERVER_KEY = ""
-GEMINI_API_KEY = ""
-INTERNAL_WEBHOOK_SECRET = "ahlelele-ahlelas"
+ENVIRONMENT = "production"
 RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
-TWILIO_PHONE_NUMBER = "+1XXXXXXXXXX" 
-JINA_API_KEY = "key"
 
 # Production overrides
 [env.production]

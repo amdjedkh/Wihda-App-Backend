@@ -34,7 +34,7 @@ campaigns.get("/", authMiddleware, async (c) => {
     // Neighborhood-scoped: return campaigns for this neighborhood
     let query = `
       SELECT * FROM campaigns
-      WHERE (neighborhood_id = ? OR neighborhood_id IS NULL)
+      WHERE neighborhood_id = ?
         AND status = 'active'
     `;
     const params: any[] = [authContext.neighborhoodId];
@@ -56,9 +56,7 @@ campaigns.get("/", authMiddleware, async (c) => {
     query += ` ORDER BY start_dt ASC LIMIT ?`;
     params.push(limit);
 
-    const result = params.length > 1
-      ? await c.env.DB.prepare(query).bind(...params).all()
-      : await c.env.DB.prepare(query).bind(limit).all();
+    const result = await c.env.DB.prepare(query).bind(...params).all();
     rows = result.results as any[];
   }
 

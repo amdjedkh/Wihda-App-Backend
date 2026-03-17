@@ -410,17 +410,6 @@ cleanify.post(
       );
     }
 
-    if (elapsed < MIN_DELAY_MS) {
-      const waitMs = MIN_DELAY_MS - elapsed;
-      const availableAt = new Date(beforeAt + MIN_DELAY_MS).toISOString();
-      return errorResponse(
-        "TOO_EARLY",
-        `After photo not available yet. Please wait ${Math.ceil(waitMs / 60000)} more minute(s).`,
-        400,
-        { available_at: availableAt },
-      );
-    }
-
     const body = await c.req.json().catch(() => ({}));
     const validation = presignedUrlSchema.safeParse(body);
     if (!validation.success) {

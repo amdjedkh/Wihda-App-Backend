@@ -111,7 +111,7 @@ async function buildUploadUrl(
     fileKey,
     contentType,
   );
-  return `${new URL(requestUrl).origin}/v1/uploads/direct?token=${token}`;
+  return `${new URL(requestUrl).origin}/v1/uploads/direct?token=${encodeURIComponent(token)}`;
 }
 
 /** Public read URL for a confirmed R2 object key. */

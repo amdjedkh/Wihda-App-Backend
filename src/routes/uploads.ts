@@ -62,7 +62,7 @@ uploads.post("/presigned-url", authMiddleware, async (c) => {
     );
 
     const origin = new URL(c.req.url).origin;
-    const uploadUrl = `${origin}/v1/uploads/direct?token=${uploadToken}`;
+    const uploadUrl = `${origin}/v1/uploads/direct?token=${encodeURIComponent(uploadToken)}`;
     const fileUrl = `${origin}/v1/uploads/${fileKey}`;
 
     return successResponse({

@@ -18,7 +18,7 @@ local_protocol = "http"
 [[d1_databases]]
 binding = "DB"
 database_name = "wihda-db"
-database_id = "placeholder-db-id" # Replace with actual D1 database ID
+database_id = "2969f23e-377f-4c34-8be8-d991f99a62a1" # Replace with actual D1 database ID
 
 # R2 Storage binding for images
 [[r2_buckets]]
@@ -28,7 +28,7 @@ bucket_name = "wihda-uploads"
 # KV Namespace for rate limiting and caching
 [[kv_namespaces]]
 binding = "KV"
-id = "placeholder-kv-id" # Replace with actual KV namespace ID
+id = "756ad63c190d48848456907a9dc9e69b" # Replace with actual KV namespace ID
 
 # Queue for matching jobs
 [[queues.producers]]

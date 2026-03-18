@@ -671,15 +671,10 @@ user.post("/change-email/initiate", authMiddleware, requireVerified, async (c) =
   const buf = await crypto.subtle.digest("SHA-256", enc.encode(otp));
   const hashedOtp = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 
-  // Store pending email change (reuse contact_verifications table with channel='email_change')
+  // Store pending email change on the user row
   await c.env.DB.prepare(`
-    DELETE FROM contact_verifications WHERE user_id = ? AND channel = 'email_change'
-  `).bind(authContext.userId).run();
-
-  await c.env.DB.prepare(`
-    INSERT INTO contact_verifications (id, user_id, channel, contact_value, otp_hash, expires_at, attempts, sends_count, created_at)
-    VALUES (?, ?, 'email_change', ?, ?, datetime('now', '+10 minutes'), 0, 1, datetime('now'))
-  `).bind(crypto.randomUUID(), authContext.userId, newEmail, hashedOtp).run();
+    UPDATE users SET pending_email = ?, pending_email_code_hash = ?, pending_email_expires_at = datetime('now', '+10 minutes'), updated_at = datetime('now') WHERE id = ?
+  `).bind(newEmail, hashedOtp, authContext.userId).run();
 
   // Send OTP email via Resend
   if (c.env.RESEND_API_KEY) {
@@ -721,18 +716,15 @@ user.post("/change-email/confirm", authMiddleware, requireVerified, async (c) =>
     return errorResponse("VALIDATION_ERROR", "new_email and code are required", 400);
   }
 
-  const record = await c.env.DB.prepare(`
-    SELECT * FROM contact_verifications
-    WHERE user_id = ? AND channel = 'email_change' AND contact_value = ?
-    ORDER BY created_at DESC LIMIT 1
-  `).bind(authContext.userId, newEmail).first<any>();
+  const pendingUser = await c.env.DB.prepare(
+    "SELECT pending_email, pending_email_code_hash, pending_email_expires_at FROM users WHERE id = ?"
+  ).bind(authContext.userId).first<any>();
 
-  if (!record) return errorResponse("NOT_FOUND", "No pending email change found", 404);
-  if (new Date(record.expires_at) < new Date()) {
-    return errorResponse("OTP_EXPIRED", "Code has expired. Please request a new one.", 410);
+  if (!pendingUser?.pending_email || pendingUser.pending_email !== newEmail) {
+    return errorResponse("NOT_FOUND", "No pending email change found", 404);
   }
-  if (record.attempts >= 5) {
-    return errorResponse("TOO_MANY_ATTEMPTS", "Too many attempts. Please request a new code.", 429);
+  if (!pendingUser.pending_email_expires_at || new Date(pendingUser.pending_email_expires_at) < new Date()) {
+    return errorResponse("OTP_EXPIRED", "Code has expired. Please request a new one.", 410);
   }
 
   // Hash provided code and compare
@@ -740,18 +732,16 @@ user.post("/change-email/confirm", authMiddleware, requireVerified, async (c) =>
   const buf = await crypto.subtle.digest("SHA-256", enc.encode(code));
   const hashedInput = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 
-  if (hashedInput !== record.otp_hash) {
-    await c.env.DB.prepare("UPDATE contact_verifications SET attempts = attempts + 1 WHERE id = ?")
-      .bind(record.id).run();
+  if (hashedInput !== pendingUser.pending_email_code_hash) {
     return errorResponse("INVALID_OTP", "Incorrect code", 400);
   }
 
-  // Update user's email
-  await c.env.DB.prepare("UPDATE users SET email = ?, email_verified = 1, updated_at = datetime('now') WHERE id = ?")
-    .bind(newEmail, authContext.userId).run();
-
-  // Clean up verification record
-  await c.env.DB.prepare("DELETE FROM contact_verifications WHERE id = ?").bind(record.id).run();
+  // Update user's email and clear pending fields
+  await c.env.DB.prepare(`
+    UPDATE users SET email = ?, email_verified = 1,
+      pending_email = NULL, pending_email_code_hash = NULL, pending_email_expires_at = NULL,
+      updated_at = datetime('now') WHERE id = ?
+  `).bind(newEmail, authContext.userId).run();
 
   return successResponse({ updated: true, email: newEmail });
 });

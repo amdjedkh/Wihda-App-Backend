@@ -21,7 +21,7 @@ import {
   voidCoinEntry,
   createCoinEntry,
 } from "../lib/db";
-import { successResponse, errorResponse } from "../lib/utils";
+import { successResponse, errorResponse, hashPassword, verifyPassword } from "../lib/utils";
 import {
   authMiddleware,
   requireVerified,
@@ -361,6 +361,38 @@ user.delete("/", authMiddleware, async (c) => {
   ).bind(authContext.userId).run();
 
   return successResponse({ deleted: true });
+});
+
+/**
+ * POST /v1/me/change-password
+ * Verifies current password, then updates to new password.
+ */
+user.post("/change-password", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+
+  const body = await c.req.json().catch(() => null);
+  if (!body?.current_password || !body?.new_password) {
+    return errorResponse("VALIDATION_ERROR", "current_password and new_password are required", 400);
+  }
+  if (body.new_password.length < 8) {
+    return errorResponse("VALIDATION_ERROR", "New password must be at least 8 characters", 400);
+  }
+
+  const user = await getUserById(c.env.DB, authContext.userId);
+  if (!user) return errorResponse("NOT_FOUND", "User not found", 404);
+
+  const isValid = await verifyPassword(body.current_password, user.password_hash);
+  if (!isValid) {
+    return errorResponse("INVALID_CREDENTIALS", "Current password is incorrect", 401);
+  }
+
+  const newHash = await hashPassword(body.new_password);
+  await c.env.DB.prepare(
+    "UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?"
+  ).bind(newHash, authContext.userId).run();
+
+  return successResponse({ changed: true });
 });
 
 /**

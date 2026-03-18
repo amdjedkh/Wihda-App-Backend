@@ -94,14 +94,21 @@ admin.post("/campaigns", async (c) => {
   catch { return errorResponse("INVALID_BODY", "JSON body required", 400); }
 
   const {
-    title, description, organizer, location,
-    start_dt, end_dt, url, image_url,
+    title, subtitle, description, organizer, organizer_logo,
+    location, start_dt, end_dt, url,
+    images, image_url,
     contact_phone, contact_email, coin_reward,
   } = body;
 
   if (!title || !start_dt) {
     return errorResponse("MISSING_FIELDS", "title and start_dt are required", 400);
   }
+
+  // Build images array: explicit array from admin OR fallback to single image_url
+  const imagesArr: string[] = Array.isArray(images) ? images.filter(Boolean).slice(0, 3)
+    : (image_url ? [image_url] : []);
+  const imagesJson = imagesArr.length > 0 ? JSON.stringify(imagesArr) : null;
+  const primaryImageUrl = imagesArr[0] ?? null;
 
   const { results: neighborhoods } = await db
     .prepare("SELECT id FROM neighborhoods WHERE is_active = 1")
@@ -122,24 +129,31 @@ admin.post("/campaigns", async (c) => {
     await db
       .prepare(
         `INSERT INTO campaigns
-           (id, neighborhood_id, title, description, organizer, location,
-            start_dt, end_dt, url, image_url,
+           (id, neighborhood_id, title, subtitle, description, organizer, organizer_logo,
+            location, start_dt, end_dt, url, image_url, images_json,
+            contact_phone, contact_email,
             source, source_identifier, status, last_seen_at,
-            created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'manual', ?, 'active', ?, ?, ?)`,
+            coin_reward, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'manual', ?, 'active', ?, ?, ?, ?)`,
       )
       .bind(
         id,
         n.id,
         title,
-        description ?? null,
-        organizer   ?? null,
-        location    ?? null,
+        subtitle       ?? null,
+        description    ?? null,
+        organizer      ?? null,
+        organizer_logo ?? null,
+        location       ?? null,
         start_dt,
-        end_dt      ?? null,
-        image_url   ?? null,
+        end_dt         ?? null,
+        primaryImageUrl,
+        imagesJson,
+        contact_phone  ?? null,
+        contact_email  ?? null,
         sourceIdentifier,
         now,   // last_seen_at
+        parseInt(coin_reward) || 50,
         now,
         now,
       )

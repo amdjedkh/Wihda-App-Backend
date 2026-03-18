@@ -100,12 +100,17 @@ new_sqlite_classes = ["ChatThreadDurableObject"]
 [triggers]
 crons = ["0 */12 * * *"]  # Every 12 hours for campaign ingestion
 
+# Cloudflare Workers AI (for activity image generation)
+[ai]
+binding = "AI"
+
 # Non-sensitive environment variables only.
 # Sensitive values (JWT_SECRET, GEMINI_API_KEY, etc.) must be set with:
 #   wrangler secret put <NAME>
 [vars]
 ENVIRONMENT = "production"
 RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
+WORKERS_BASE_URL = "https://wihda-backend.khamjed123.workers.dev"
 
 # Production overrides
 [env.production]

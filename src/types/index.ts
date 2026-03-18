@@ -10,6 +10,7 @@ export interface Env {
   DB: D1Database;
   STORAGE: R2Bucket;
   KV: KVNamespace;
+  AI: Ai;
 
   MATCHING_QUEUE: Queue<MatchingQueueMessage>;
   CAMPAIGN_QUEUE: Queue<CampaignQueueMessage>;
@@ -37,6 +38,7 @@ export interface Env {
   TWILIO_PHONE_NUMBER: string;
 
   JINA_API_KEY: string;
+  WORKERS_BASE_URL: string;
 
   // ── Google OAuth ──────────────────────────────────────────────────────────
   GOOGLE_CLIENT_ID?: string;

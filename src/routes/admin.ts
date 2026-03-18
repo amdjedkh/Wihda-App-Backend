@@ -104,7 +104,7 @@ admin.post("/campaigns", async (c) => {
   }
 
   const { results: neighborhoods } = await db
-    .prepare("SELECT id FROM neighborhoods WHERE status = 'active'")
+    .prepare("SELECT id FROM neighborhoods WHERE is_active = 1")
     .all<{ id: string }>();
 
   if (neighborhoods.length === 0) {

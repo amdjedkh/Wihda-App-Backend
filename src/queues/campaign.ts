@@ -87,7 +87,7 @@ async function handleCampaignScrape(
   console.log(`[campaigns] Expired ${expired} stale campaigns`);
 
   // 2. Get active neighborhoods (scoped if queue message specifies one)
-  let neighborhoodQuery = `SELECT id, name FROM neighborhoods WHERE status = 'active'`;
+  let neighborhoodQuery = `SELECT id, name FROM neighborhoods WHERE is_active = 1`;
   const neighborhoodParams: string[] = [];
   if (scopeNeighborhoodId) {
     neighborhoodQuery += " AND id = ?";

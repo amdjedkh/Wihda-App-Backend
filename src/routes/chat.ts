@@ -320,7 +320,7 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
     // Mark offer as completed (GIVE thread only)
     if (offerIdForDeletion) {
       await c.env.DB.prepare(
-        "UPDATE leftover_offers SET status = 'completed', updated_at = ? WHERE id = ?"
+        "UPDATE leftover_offers SET status = 'closed', updated_at = ? WHERE id = ?"
       ).bind(toISODateString(), offerIdForDeletion).run();
     }
 

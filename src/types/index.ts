@@ -474,6 +474,7 @@ export type NotificationType =
   | "cleanify_approved"
   | "cleanify_rejected"
   | "campaign_new"
+  | "leftover_request"
   | "system"
   | "verification_approved"
   | "verification_rejected";

@@ -537,6 +537,7 @@ export async function createLeftoverOffer(
     neighborhoodId: string;
     title: string;
     description?: string;
+    imageUrl?: string;
     surveyJson: string;
     quantity?: number;
     pickupWindowStart?: string;
@@ -550,9 +551,9 @@ export async function createLeftoverOffer(
   await db
     .prepare(
       `
-    INSERT INTO leftover_offers 
-    (id, user_id, neighborhood_id, title, description, survey_json, quantity, pickup_window_start, pickup_window_end, expiry_at, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+    INSERT INTO leftover_offers
+    (id, user_id, neighborhood_id, title, description, image_url, survey_json, quantity, pickup_window_start, pickup_window_end, expiry_at, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
   `,
     )
     .bind(
@@ -561,6 +562,7 @@ export async function createLeftoverOffer(
       data.neighborhoodId,
       data.title,
       data.description || null,
+      data.imageUrl || null,
       data.surveyJson,
       data.quantity || 1,
       data.pickupWindowStart || null,
@@ -639,7 +641,8 @@ export async function createLeftoverNeed(
   data: {
     userId: string;
     neighborhoodId: string;
-    surveyJson: string;
+    title?: string;
+    description?: string;
     urgency?: string;
   },
 ): Promise<LeftoverNeed> {
@@ -649,16 +652,17 @@ export async function createLeftoverNeed(
   await db
     .prepare(
       `
-    INSERT INTO leftover_needs 
-    (id, user_id, neighborhood_id, survey_json, urgency, status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+    INSERT INTO leftover_needs
+    (id, user_id, neighborhood_id, title, description, survey_json, urgency, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, '{}', ?, 'active', ?, ?)
   `,
     )
     .bind(
       id,
       data.userId,
       data.neighborhoodId,
-      data.surveyJson,
+      data.title || null,
+      data.description || null,
       data.urgency || "normal",
       now,
       now,
@@ -846,7 +850,8 @@ export async function updateMatchStatus(
 export async function createChatThread(
   db: D1Database,
   data: {
-    matchId: string;
+    matchId?: string | null;
+    offerId?: string | null;
     neighborhoodId: string;
     participant1Id: string;
     participant2Id: string;
@@ -858,14 +863,15 @@ export async function createChatThread(
   await db
     .prepare(
       `
-    INSERT INTO chat_threads 
-    (id, match_id, neighborhood_id, participant_1_id, participant_2_id, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'active', ?)
+    INSERT INTO chat_threads
+    (id, match_id, offer_id, neighborhood_id, participant_1_id, participant_2_id, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
   `,
     )
     .bind(
       id,
-      data.matchId,
+      data.matchId ?? null,
+      data.offerId ?? null,
       data.neighborhoodId,
       data.participant1Id,
       data.participant2Id,

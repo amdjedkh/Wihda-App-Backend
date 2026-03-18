@@ -136,7 +136,7 @@ chat.get("/:thread_id", authMiddleware, async (c) => {
     }
   }
 
-  const match = await getMatchById(c.env.DB, thread.match_id);
+  const match = thread.match_id ? await getMatchById(c.env.DB, thread.match_id) : null;
   const otherUserId =
     thread.participant_1_id === authContext.userId
       ? thread.participant_2_id
@@ -151,6 +151,7 @@ chat.get("/:thread_id", authMiddleware, async (c) => {
   return successResponse({
     id: thread.id,
     match_id: thread.match_id,
+    offer_id: (thread as any).offer_id ?? null,
     match: match
       ? {
           id: match.id,

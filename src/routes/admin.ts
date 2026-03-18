@@ -164,6 +164,80 @@ admin.post("/campaigns", async (c) => {
   return c.json({ success: true, data: { inserted } }, 201);
 });
 
+// ─── PUT /v1/admin/campaigns/:id ─────────────────────────────────────────────
+
+admin.put("/campaigns/:id", async (c) => {
+  const db  = c.env.DB;
+  const { id } = c.req.param();
+
+  let body: any;
+  try { body = await c.req.json(); }
+  catch { return errorResponse("INVALID_BODY", "JSON body required", 400); }
+
+  const {
+    title, subtitle, description, organizer, organizer_logo,
+    location, start_dt, end_dt, url,
+    images, image_url,
+    contact_phone, contact_email, coin_reward,
+  } = body;
+
+  if (!title || !start_dt) {
+    return errorResponse("MISSING_FIELDS", "title and start_dt are required", 400);
+  }
+
+  const imagesArr: string[] = Array.isArray(images) ? images.filter(Boolean).slice(0, 3)
+    : (image_url ? [image_url] : []);
+  const imagesJson      = imagesArr.length > 0 ? JSON.stringify(imagesArr) : null;
+  const primaryImageUrl = imagesArr[0] ?? null;
+  const now             = new Date().toISOString();
+
+  const { meta } = await db
+    .prepare(
+      `UPDATE campaigns SET
+         title          = ?,
+         subtitle       = ?,
+         description    = ?,
+         organizer      = ?,
+         organizer_logo = ?,
+         location       = ?,
+         start_dt       = ?,
+         end_dt         = ?,
+         url            = ?,
+         image_url      = ?,
+         images_json    = ?,
+         contact_phone  = ?,
+         contact_email  = ?,
+         coin_reward    = ?,
+         updated_at     = ?
+       WHERE id = ?`,
+    )
+    .bind(
+      title,
+      subtitle       ?? null,
+      description    ?? null,
+      organizer      ?? null,
+      organizer_logo ?? null,
+      location       ?? null,
+      start_dt,
+      end_dt         ?? null,
+      url            ?? null,
+      primaryImageUrl,
+      imagesJson,
+      contact_phone  ?? null,
+      contact_email  ?? null,
+      parseInt(coin_reward) || 50,
+      now,
+      id,
+    )
+    .run();
+
+  if (meta.changes === 0) {
+    return errorResponse("NOT_FOUND", "Campaign not found", 404);
+  }
+
+  return c.json({ success: true });
+});
+
 // ─── DELETE /v1/admin/campaigns/:id ──────────────────────────────────────────
 
 admin.delete("/campaigns/:id", async (c) => {

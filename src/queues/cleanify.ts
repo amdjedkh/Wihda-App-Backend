@@ -36,7 +36,7 @@ interface GeminiResponse {
 
 const GEMINI_MODEL = "gemini-1.5-flash";
 const GEMINI_API_BASE =
-  "https://generativelanguage.googleapis.com/v1beta/models";
+  "https://generativelanguage.googleapis.com/v1/models";
 const CONFIDENCE_THRESHOLD = 0.7;
 
 const SYSTEM_PROMPT = `You are a photo verification assistant for Wihda, a civic neighbourhood application.

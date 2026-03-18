@@ -116,6 +116,9 @@ admin.post("/campaigns", async (c) => {
 
   for (const n of neighborhoods) {
     const id = crypto.randomUUID();
+    // source_identifier is unique per row; url set to NULL so (source, url) UNIQUE
+    // constraint is never triggered (SQLite treats each NULL as distinct).
+    const sourceIdentifier = `admin:${n.id}:${id}`;
     await db
       .prepare(
         `INSERT INTO campaigns
@@ -123,7 +126,7 @@ admin.post("/campaigns", async (c) => {
             start_dt, end_dt, url, image_url,
             source, source_identifier, status, last_seen_at,
             created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, 'active', ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'manual', ?, 'active', ?, ?, ?)`,
       )
       .bind(
         id,
@@ -134,10 +137,9 @@ admin.post("/campaigns", async (c) => {
         location    ?? null,
         start_dt,
         end_dt      ?? null,
-        url         ?? null,
         image_url   ?? null,
-        title,   // source_identifier
-        now,     // last_seen_at
+        sourceIdentifier,
+        now,   // last_seen_at
         now,
         now,
       )

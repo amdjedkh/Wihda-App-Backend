@@ -415,11 +415,7 @@ export async function handleCleanifyQueue(
             },
       );
 
-      // ── 8. Delete photos from R2 (storage hygiene) ───────────────────────────
-      await Promise.allSettled([
-        env.STORAGE.delete(row.before_photo_key),
-        env.STORAGE.delete(row.after_photo_key),
-      ]);
+      // Photos are kept in R2 so users can view them on the result page.
 
       message.ack();
     } catch (err) {

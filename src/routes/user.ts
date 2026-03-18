@@ -627,4 +627,133 @@ user.post("/:userId/coins/adjust", authMiddleware, requireAdmin, async (c) => {
   });
 });
 
+/**
+ * POST /v1/me/change-email/initiate
+ * Verify current password, then send OTP to new email address.
+ */
+user.post("/change-email/initiate", authMiddleware, requireVerified, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+
+  const body = await c.req.json().catch(() => ({})) as any;
+  const newEmail = (body.new_email || '').trim().toLowerCase();
+  const password = body.password || '';
+
+  if (!newEmail || !password) {
+    return errorResponse("VALIDATION_ERROR", "new_email and password are required", 400);
+  }
+
+  // Basic email format check
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+    return errorResponse("VALIDATION_ERROR", "Invalid email format", 400);
+  }
+
+  // Verify current password
+  const currentUser = await getUserById(c.env.DB, authContext.userId);
+  if (!currentUser) return errorResponse("NOT_FOUND", "User not found", 404);
+
+  const { verifyPassword } = await import("../lib/utils");
+  const isValid = await verifyPassword(password, (currentUser as any).password_hash);
+  if (!isValid) return errorResponse("INVALID_PASSWORD", "Incorrect password", 401);
+
+  // Check new email not already taken
+  const existing = await c.env.DB.prepare("SELECT id FROM users WHERE email = ? AND id != ?")
+    .bind(newEmail, authContext.userId).first<{ id: string }>();
+  if (existing) return errorResponse("EMAIL_TAKEN", "Email is already in use", 409);
+
+  // Generate 6-digit OTP
+  const array = new Uint32Array(1);
+  crypto.getRandomValues(array);
+  const otp = String(array[0] % 1_000_000).padStart(6, "0");
+
+  // Hash OTP for storage
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(otp));
+  const hashedOtp = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  // Store pending email change (reuse contact_verifications table with channel='email_change')
+  await c.env.DB.prepare(`
+    DELETE FROM contact_verifications WHERE user_id = ? AND channel = 'email_change'
+  `).bind(authContext.userId).run();
+
+  await c.env.DB.prepare(`
+    INSERT INTO contact_verifications (id, user_id, channel, contact_value, otp_hash, expires_at, attempts, sends_count, created_at)
+    VALUES (?, ?, 'email_change', ?, ?, datetime('now', '+10 minutes'), 0, 1, datetime('now'))
+  `).bind(crypto.randomUUID(), authContext.userId, newEmail, hashedOtp).run();
+
+  // Send OTP email via Resend
+  if (c.env.RESEND_API_KEY) {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: c.env.RESEND_FROM_EMAIL,
+        to: [newEmail],
+        subject: "Confirm your new Wihda email",
+        html: `<div style="font-family:sans-serif;max-width:480px;margin:0 auto">
+          <h2>Confirm email change</h2>
+          <p>Use this code to confirm your new email address. It expires in <strong>10 minutes</strong>.</p>
+          <div style="font-size:36px;font-weight:bold;letter-spacing:8px;background:#f4f4f5;padding:20px 32px;border-radius:8px;text-align:center;color:#18181b;margin:24px 0">${otp}</div>
+          <p style="color:#71717a;font-size:14px">If you didn't request this, ignore this email.</p>
+        </div>`,
+      }),
+    }).catch(() => {});
+  } else {
+    console.log(`[DEV] Email change OTP for ${newEmail}: ${otp}`);
+  }
+
+  return successResponse({ sent: true, email: newEmail });
+});
+
+/**
+ * POST /v1/me/change-email/confirm
+ * Confirm OTP and update the user's email.
+ */
+user.post("/change-email/confirm", authMiddleware, requireVerified, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+
+  const body = await c.req.json().catch(() => ({})) as any;
+  const newEmail = (body.new_email || '').trim().toLowerCase();
+  const code = (body.code || '').trim();
+
+  if (!newEmail || !code) {
+    return errorResponse("VALIDATION_ERROR", "new_email and code are required", 400);
+  }
+
+  const record = await c.env.DB.prepare(`
+    SELECT * FROM contact_verifications
+    WHERE user_id = ? AND channel = 'email_change' AND contact_value = ?
+    ORDER BY created_at DESC LIMIT 1
+  `).bind(authContext.userId, newEmail).first<any>();
+
+  if (!record) return errorResponse("NOT_FOUND", "No pending email change found", 404);
+  if (new Date(record.expires_at) < new Date()) {
+    return errorResponse("OTP_EXPIRED", "Code has expired. Please request a new one.", 410);
+  }
+  if (record.attempts >= 5) {
+    return errorResponse("TOO_MANY_ATTEMPTS", "Too many attempts. Please request a new code.", 429);
+  }
+
+  // Hash provided code and compare
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", enc.encode(code));
+  const hashedInput = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  if (hashedInput !== record.otp_hash) {
+    await c.env.DB.prepare("UPDATE contact_verifications SET attempts = attempts + 1 WHERE id = ?")
+      .bind(record.id).run();
+    return errorResponse("INVALID_OTP", "Incorrect code", 400);
+  }
+
+  // Update user's email
+  await c.env.DB.prepare("UPDATE users SET email = ?, email_verified = 1, updated_at = datetime('now') WHERE id = ?")
+    .bind(newEmail, authContext.userId).run();
+
+  // Clean up verification record
+  await c.env.DB.prepare("DELETE FROM contact_verifications WHERE id = ?").bind(record.id).run();
+
+  return successResponse({ updated: true, email: newEmail });
+});
+
 export default user;

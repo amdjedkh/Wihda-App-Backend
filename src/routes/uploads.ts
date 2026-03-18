@@ -21,6 +21,7 @@ const presignedUrlSchema = z.object({
     "after_photo",
     "chat_image",
     "campaign_image",
+    "leftover_image",
   ]),
   file_extension: z.string().regex(/^(jpg|jpeg|png|webp|gif)$/i),
 });

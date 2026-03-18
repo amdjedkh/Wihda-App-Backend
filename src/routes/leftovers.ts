@@ -571,6 +571,76 @@ leftovers.get("/needs/:id", authMiddleware, async (c) => {
 });
 
 /**
+ * POST /v1/leftovers/needs/:id/request
+ * Helper clicks "Offer Help" on a need → creates a direct chat thread
+ */
+leftovers.post("/needs/:id/request", authMiddleware, requireNeighborhood, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext || !authContext.neighborhoodId) {
+    return errorResponse("UNAUTHORIZED", "Authentication and neighborhood required", 401);
+  }
+
+  const needId = c.req.param("id");
+  const need = await getLeftoverNeedById(c.env.DB, needId);
+  if (!need) {
+    return errorResponse("NOT_FOUND", "Need not found", 404);
+  }
+
+  if (need.user_id === authContext.userId) {
+    return errorResponse("FORBIDDEN", "You cannot offer help on your own request", 403);
+  }
+
+  if (need.status !== "active") {
+    return errorResponse("GONE", "This request is no longer active", 410);
+  }
+
+  // Check if thread already exists for this need between these two users
+  const existing = await c.env.DB.prepare(
+    `SELECT id FROM chat_threads
+     WHERE need_id = ? AND (
+       (participant_1_id = ? AND participant_2_id = ?) OR
+       (participant_1_id = ? AND participant_2_id = ?)
+     ) AND status = 'active'`,
+  )
+    .bind(needId, authContext.userId, need.user_id, need.user_id, authContext.userId)
+    .first<{ id: string }>();
+
+  if (existing) {
+    return successResponse({ thread_id: existing.id, already_exists: true });
+  }
+
+  const thread = await createChatThread(c.env.DB, {
+    matchId: null,
+    needId,
+    neighborhoodId: authContext.neighborhoodId,
+    participant1Id: authContext.userId,
+    participant2Id: need.user_id,
+  });
+
+  const helper = await getUserById(c.env.DB, authContext.userId);
+  const helperName = helper?.display_name || "A neighbor";
+
+  await c.env.DB.prepare(
+    `INSERT INTO chat_messages (id, thread_id, sender_id, body, message_type, created_at)
+     VALUES (?, ?, ?, ?, 'system', datetime('now'))`,
+  )
+    .bind(generateId(), thread.id, authContext.userId,
+      `${helperName} wants to help with "${(need as any).title || 'your request'}"`)
+    .run();
+
+  await c.env.NOTIFICATION_QUEUE.send({
+    user_id: need.user_id,
+    type: "leftover_request",
+    title: "Someone wants to help!",
+    body: `${helperName} wants to help with your request`,
+    data: { thread_id: thread.id, need_id: needId },
+    timestamp: toISODateString(),
+  });
+
+  return successResponse({ thread_id: thread.id, already_exists: false });
+});
+
+/**
  * DELETE /v1/leftovers/needs/:id
  * Delete own need
  */

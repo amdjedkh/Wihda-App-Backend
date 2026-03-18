@@ -852,6 +852,7 @@ export async function createChatThread(
   data: {
     matchId?: string | null;
     offerId?: string | null;
+    needId?: string | null;
     neighborhoodId: string;
     participant1Id: string;
     participant2Id: string;
@@ -864,14 +865,15 @@ export async function createChatThread(
     .prepare(
       `
     INSERT INTO chat_threads
-    (id, match_id, offer_id, neighborhood_id, participant_1_id, participant_2_id, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+    (id, match_id, offer_id, need_id, neighborhood_id, participant_1_id, participant_2_id, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
   `,
     )
     .bind(
       id,
       data.matchId ?? null,
       data.offerId ?? null,
+      data.needId ?? null,
       data.neighborhoodId,
       data.participant1Id,
       data.participant2Id,

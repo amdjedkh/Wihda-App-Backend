@@ -15,6 +15,9 @@ import {
   getChatMessages,
   createChatMessage,
   getMatchById,
+  getLeftoverOfferById,
+  getLeftoverNeedById,
+  createCoinEntry,
 } from "../lib/db";
 import { successResponse, errorResponse, toISODateString } from "../lib/utils";
 import {
@@ -22,6 +25,7 @@ import {
   requireVerified,
   getAuthContext,
 } from "../middleware/auth";
+import { checkAndAwardBadges } from "../lib/badges";
 
 const chat = new Hono<{ Bindings: Env }>();
 
@@ -103,7 +107,7 @@ chat.get("/", authMiddleware, async (c) => {
 
 /**
  * GET /v1/chats/:thread_id
- * Get thread metadata
+ * Get thread metadata (includes role info for confirmation UI)
  */
 chat.get("/:thread_id", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
@@ -118,24 +122,16 @@ chat.get("/:thread_id", authMiddleware, async (c) => {
     return errorResponse("NOT_FOUND", "Chat thread not found", 404);
   }
 
-  // Verify user is a participant
   if (
     thread.participant_1_id !== authContext.userId &&
     thread.participant_2_id !== authContext.userId
   ) {
-    // Check if moderator
-    if (
-      authContext.userRole !== "moderator" &&
-      authContext.userRole !== "admin"
-    ) {
-      return errorResponse(
-        "FORBIDDEN",
-        "You do not have access to this thread",
-        403,
-      );
+    if (authContext.userRole !== "moderator" && authContext.userRole !== "admin") {
+      return errorResponse("FORBIDDEN", "You do not have access to this thread", 403);
     }
   }
 
+  const threadAny = thread as any;
   const match = thread.match_id ? await getMatchById(c.env.DB, thread.match_id) : null;
   const otherUserId =
     thread.participant_1_id === authContext.userId
@@ -148,23 +144,206 @@ chat.get("/:thread_id", authMiddleware, async (c) => {
     .bind(otherUserId)
     .first<{ id: string; display_name: string }>();
 
+  // Determine giver/receiver IDs for confirmation UI
+  let giverId: string | null = null;
+  let receiverId: string | null = null;
+
+  if (threadAny.offer_id) {
+    const offer = await getLeftoverOfferById(c.env.DB, threadAny.offer_id);
+    if (offer) {
+      giverId = offer.user_id;
+      receiverId = thread.participant_1_id === offer.user_id
+        ? thread.participant_2_id
+        : thread.participant_1_id;
+    }
+  } else if (threadAny.need_id) {
+    const need = await getLeftoverNeedById(c.env.DB, threadAny.need_id);
+    if (need) {
+      receiverId = need.user_id;
+      giverId = thread.participant_1_id === need.user_id
+        ? thread.participant_2_id
+        : thread.participant_1_id;
+    }
+  }
+
   return successResponse({
     id: thread.id,
     match_id: thread.match_id,
-    offer_id: (thread as any).offer_id ?? null,
-    match: match
-      ? {
-          id: match.id,
-          status: match.status,
-          score: match.score,
-        }
-      : null,
+    offer_id: threadAny.offer_id ?? null,
+    need_id: threadAny.need_id ?? null,
+    confirmation_state: threadAny.confirmation_state ?? null,
+    giver_id: giverId,
+    receiver_id: receiverId,
+    match: match ? { id: match.id, status: match.status, score: match.score } : null,
     other_user: otherUser,
     participants: [thread.participant_1_id, thread.participant_2_id],
     status: thread.status,
     created_at: thread.created_at,
     closed_at: thread.closed_at,
   });
+});
+
+/**
+ * POST /v1/chats/:thread_id/confirm
+ * Two-step exchange confirmation:
+ *   Step 1 — giver/helper clicks YES → state = 'giver_confirmed'
+ *   Step 2 — receiver clicks YES → complete + award coins
+ *             receiver clicks CANCEL → state = 'cancelled'
+ */
+chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  const threadId = c.req.param("thread_id");
+  const thread = await getChatThreadById(c.env.DB, threadId);
+
+  if (!thread) return errorResponse("NOT_FOUND", "Thread not found", 404);
+
+  if (
+    thread.participant_1_id !== authContext.userId &&
+    thread.participant_2_id !== authContext.userId
+  ) {
+    return errorResponse("FORBIDDEN", "Not a participant", 403);
+  }
+
+  if (thread.status !== "active") {
+    return errorResponse("THREAD_CLOSED", "Thread is already closed", 400);
+  }
+
+  const body = await c.req.json();
+  const action: "confirm" | "cancel" = body.action;
+
+  const threadAny = thread as any;
+  const confirmationState: string | null = threadAny.confirmation_state ?? null;
+
+  // Determine roles
+  let giverId: string | null = null;
+  let receiverId: string | null = null;
+  let offerIdForDeletion: string | null = null;
+
+  if (threadAny.offer_id) {
+    const offer = await getLeftoverOfferById(c.env.DB, threadAny.offer_id);
+    if (offer) {
+      giverId = offer.user_id;
+      receiverId = thread.participant_1_id === offer.user_id
+        ? thread.participant_2_id
+        : thread.participant_1_id;
+      offerIdForDeletion = offer.id;
+    }
+  } else if (threadAny.need_id) {
+    const need = await getLeftoverNeedById(c.env.DB, threadAny.need_id);
+    if (need) {
+      receiverId = need.user_id;
+      giverId = thread.participant_1_id === need.user_id
+        ? thread.participant_2_id
+        : thread.participant_1_id;
+    }
+  }
+
+  const isGiver = authContext.userId === giverId;
+  const isReceiver = authContext.userId === receiverId;
+
+  // ── Step 1: Giver initiates ───────────────────────────────────────────────
+  if (confirmationState === null) {
+    if (!isGiver) {
+      return errorResponse("FORBIDDEN", "Only the giver/helper can initiate confirmation", 403);
+    }
+    await c.env.DB.prepare(
+      "UPDATE chat_threads SET confirmation_state = 'giver_confirmed', confirmed_by = ? WHERE id = ?"
+    ).bind(authContext.userId, threadId).run();
+
+    // Notify receiver
+    if (receiverId) {
+      const isGiveThread = !!threadAny.offer_id;
+      await c.env.NOTIFICATION_QUEUE.send({
+        user_id: receiverId,
+        type: "system" as any,
+        title: isGiveThread ? "Did you receive the item?" : "Did you receive help?",
+        body: "Open the chat to confirm the exchange",
+        data: { thread_id: threadId },
+        timestamp: toISODateString(),
+      });
+    }
+
+    return successResponse({ confirmation_state: "giver_confirmed" });
+  }
+
+  // ── Step 2: Receiver responds ─────────────────────────────────────────────
+  if (confirmationState === "giver_confirmed") {
+    if (!isReceiver) {
+      return errorResponse("FORBIDDEN", "Only the receiver can complete confirmation", 403);
+    }
+
+    if (action === "cancel") {
+      await c.env.DB.prepare(
+        "UPDATE chat_threads SET status = 'closed', confirmation_state = 'cancelled', closed_at = ? WHERE id = ?"
+      ).bind(toISODateString(), threadId).run();
+      return successResponse({ confirmation_state: "cancelled" });
+    }
+
+    // action === 'confirm' → complete exchange
+    const neighborhoodId = thread.neighborhood_id;
+
+    if (giverId) {
+      await createCoinEntry(c.env.DB, {
+        userId: giverId,
+        neighborhoodId,
+        sourceType: "leftovers_exchange_complete",
+        sourceId: `${threadId}_give`,
+        amount: 200,
+        category: "leftovers",
+        description: "Reward for completing exchange as giver/helper",
+        createdBy: "system",
+      });
+    }
+
+    if (receiverId) {
+      await createCoinEntry(c.env.DB, {
+        userId: receiverId,
+        neighborhoodId,
+        sourceType: "leftovers_exchange_receiver",
+        sourceId: `${threadId}_recv`,
+        amount: 50,
+        category: "leftovers",
+        description: "Reward for confirming exchange as receiver",
+        createdBy: "system",
+      });
+    }
+
+    // Close thread
+    await c.env.DB.prepare(
+      "UPDATE chat_threads SET status = 'closed', confirmation_state = 'completed', closed_at = ? WHERE id = ?"
+    ).bind(toISODateString(), threadId).run();
+
+    // Mark offer as completed (GIVE thread only)
+    if (offerIdForDeletion) {
+      await c.env.DB.prepare(
+        "UPDATE leftover_offers SET status = 'completed', updated_at = ? WHERE id = ?"
+      ).bind(toISODateString(), offerIdForDeletion).run();
+    }
+
+    // Award badges
+    if (giverId) checkAndAwardBadges(c.env.DB, giverId);
+    if (receiverId) checkAndAwardBadges(c.env.DB, receiverId);
+
+    // Notify giver
+    if (giverId) {
+      await c.env.NOTIFICATION_QUEUE.send({
+        user_id: giverId,
+        type: "coins_awarded",
+        title: "Exchange complete! 🎉",
+        body: "You earned 200 coins for completing the exchange!",
+        data: { thread_id: threadId, coins: 200 },
+        timestamp: toISODateString(),
+      });
+    }
+
+    return successResponse({ confirmation_state: "completed", coins_awarded: 250 });
+  }
+
+  return errorResponse("BAD_REQUEST", "Nothing to confirm in current state", 400);
 });
 
 /**

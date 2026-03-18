@@ -377,11 +377,8 @@ export async function handleCleanifyQueue(
         afterImage,
       );
 
-      // ── 5. Finalize in DB ────────────────────────────────────────────────────
+      // ── 5. Award coins first so they are in DB before status becomes visible ─
       const coinAmount = await getCoinRewardAmount(env.DB);
-      await finalizeSubmission(env.DB, submission_id, result, coinAmount);
-
-      // ── 6. Award coins on approval ───────────────────────────────────────────
       if (result.approved) {
         await awardCoins(
           env.DB,
@@ -391,6 +388,9 @@ export async function handleCleanifyQueue(
           coinAmount,
         );
       }
+
+      // ── 6. Finalize in DB (sets status → approved/rejected) ──────────────────
+      await finalizeSubmission(env.DB, submission_id, result, coinAmount);
 
       // ── 7. Notify user ───────────────────────────────────────────────────────
       await env.NOTIFICATION_QUEUE.send(

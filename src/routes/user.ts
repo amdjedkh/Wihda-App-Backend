@@ -348,7 +348,7 @@ user.patch("/", authMiddleware, requireVerified, async (c) => {
 /**
  * DELETE /v1/me
  * Soft-delete the authenticated user's account.
- * Sets status to 'deleted', preventing future logins.
+ * Sets deleted_at to prevent future logins.
  */
 user.delete("/", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
@@ -357,7 +357,7 @@ user.delete("/", authMiddleware, async (c) => {
   }
 
   await c.env.DB.prepare(
-    "UPDATE users SET status = 'deleted', updated_at = datetime('now') WHERE id = ?",
+    "UPDATE users SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
   ).bind(authContext.userId).run();
 
   return successResponse({ deleted: true });

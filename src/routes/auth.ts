@@ -197,7 +197,7 @@ auth.post("/login", async (c) => {
     }
 
     // ── Account status gate ───────────────────────────────────────────────────
-    if (user.status === "deleted") {
+    if ((user as any).deleted_at) {
       return errorResponse("ACCOUNT_DELETED", "This account has been deleted", 403);
     }
     if (user.status === "banned") {
@@ -566,6 +566,9 @@ auth.post("/google/callback", async (c) => {
     }
 
     // ── Account status gate ───────────────────────────────────────────────────
+    if ((user as any).deleted_at) {
+      return errorResponse("ACCOUNT_DELETED", "This account has been deleted", 403);
+    }
     if (user.status === "banned") {
       return errorResponse("ACCOUNT_BANNED", "Your account has been banned", 403);
     }

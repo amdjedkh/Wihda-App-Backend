@@ -233,7 +233,7 @@ user.get("/badges", authMiddleware, async (c) => {
     );
 
     // Count user progress metrics
-    const [leftoverOffersRow, cleanifyApprovedRow] = await Promise.all([
+    const [leftoverOffersRow, cleanifyApprovedRow, campaignsJoinedRow] = await Promise.all([
       c.env.DB.prepare(
         "SELECT COUNT(*) as cnt FROM leftover_offers WHERE user_id = ?",
       )
@@ -244,16 +244,23 @@ user.get("/badges", authMiddleware, async (c) => {
       )
         .bind(authContext.userId)
         .first<{ cnt: number }>(),
+      c.env.DB.prepare(
+        "SELECT COUNT(*) as cnt FROM campaign_participants WHERE user_id = ?",
+      )
+        .bind(authContext.userId)
+        .first<{ cnt: number }>(),
     ]);
 
-    const leftoverOffers = leftoverOffersRow?.cnt ?? 0;
-    const cleanifyApproved = cleanifyApprovedRow?.cnt ?? 0;
-    const totalActions = leftoverOffers + cleanifyApproved;
+    const leftoverOffers   = leftoverOffersRow?.cnt   ?? 0;
+    const cleanifyApproved = cleanifyApprovedRow?.cnt  ?? 0;
+    const campaignsJoined  = campaignsJoinedRow?.cnt   ?? 0;
+    const totalActivities  = campaignsJoined + cleanifyApproved;
 
     const progressMap: Record<string, number> = {
-      leftover_offers: leftoverOffers,
+      leftover_offers:   leftoverOffers,
       cleanify_approved: cleanifyApproved,
-      total_actions: totalActions,
+      campaigns_joined:  campaignsJoined,
+      total_activities:  totalActivities,
     };
 
     const badges = badgesResult.results.map((badge) => {
@@ -273,7 +280,14 @@ user.get("/badges", authMiddleware, async (c) => {
       };
     });
 
-    return successResponse({ badges });
+    return successResponse({
+      badges,
+      stats: {
+        cleanify_count:  cleanifyApproved,
+        shared_count:    leftoverOffers,
+        volunteer_count: campaignsJoined,
+      },
+    });
   } catch (error) {
     console.error("Badges fetch error:", error);
     return errorResponse("INTERNAL_ERROR", "Failed to fetch badges", 500);

@@ -11,6 +11,7 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import { successResponse, errorResponse } from "../lib/utils";
 import { authMiddleware, getAuthContext } from "../middleware/auth";
+import { checkAndAwardBadges } from "../lib/badges";
 
 const campaigns = new Hono<{ Bindings: Env }>();
 
@@ -159,6 +160,9 @@ campaigns.post("/:id/join", authMiddleware, async (c) => {
   const countRow = await c.env.DB.prepare(
     "SELECT COUNT(*) as cnt FROM campaign_participants WHERE campaign_id = ?"
   ).bind(campaignId).first<{ cnt: number }>();
+
+  // Non-blocking badge check after joining
+  checkAndAwardBadges(c.env.DB, authContext.userId).catch(() => {});
 
   return successResponse({ joined: true, already_joined: false, participant_count: countRow?.cnt ?? 1 });
 });

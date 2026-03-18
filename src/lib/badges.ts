@@ -10,37 +10,37 @@ export async function checkAndAwardBadges(
   userId: string,
 ): Promise<void> {
   try {
-    // Count current progress metrics
-    const [offersRow, cleanifyRow] = await Promise.all([
+    const [offersRow, cleanifyRow, campaignsRow] = await Promise.all([
       db.prepare("SELECT COUNT(*) as cnt FROM leftover_offers WHERE user_id = ?")
         .bind(userId).first<{ cnt: number }>(),
       db.prepare("SELECT COUNT(*) as cnt FROM cleanify_submissions WHERE user_id = ? AND status = 'approved'")
         .bind(userId).first<{ cnt: number }>(),
+      db.prepare("SELECT COUNT(*) as cnt FROM campaign_participants WHERE user_id = ?")
+        .bind(userId).first<{ cnt: number }>(),
     ]);
 
-    const leftoverOffers = offersRow?.cnt ?? 0;
-    const cleanifyApproved = cleanifyRow?.cnt ?? 0;
-    const totalActions = leftoverOffers + cleanifyApproved;
+    const leftoverOffers   = offersRow?.cnt    ?? 0;
+    const cleanifyApproved = cleanifyRow?.cnt   ?? 0;
+    const campaignsJoined  = campaignsRow?.cnt  ?? 0;
+    const totalActivities  = campaignsJoined + cleanifyApproved;
 
     const progress: Record<string, number> = {
-      leftover_offers:  leftoverOffers,
+      leftover_offers:   leftoverOffers,
       cleanify_approved: cleanifyApproved,
-      total_actions:    totalActions,
+      campaigns_joined:  campaignsJoined,
+      total_activities:  totalActivities,
     };
 
-    // Fetch all badge definitions
     const badgesResult = await db.prepare(
       "SELECT key, requirement_type, requirement_value FROM badges"
     ).all<{ key: string; requirement_type: string; requirement_value: number }>();
 
-    // Fetch already-earned badge keys
     const earnedResult = await db.prepare(
       "SELECT badge_key FROM user_badges WHERE user_id = ?"
     ).bind(userId).all<{ badge_key: string }>();
 
     const earned = new Set(earnedResult.results.map((r) => r.badge_key));
 
-    // Award any newly unlocked badges
     const toAward = badgesResult.results.filter((badge) => {
       if (earned.has(badge.key)) return false;
       const current = progress[badge.requirement_type] ?? 0;
@@ -53,7 +53,6 @@ export async function checkAndAwardBadges(
       ).bind(crypto.randomUUID(), userId, badge.key).run();
     }
   } catch (err) {
-    // Badge awarding is non-critical; never let it break the main request
     console.error("checkAndAwardBadges error:", err);
   }
 }

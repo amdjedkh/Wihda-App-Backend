@@ -263,7 +263,7 @@ async function awardCoins(
          (id, user_id, neighborhood_id, source_type, source_id, amount, category, description, created_at, created_by, status)
          VALUES (?, ?, ?, 'cleanify_approved', ?, ?, 'cleanify', 'Reward for AI-verified cleanify submission', ?, ?, 'valid')`,
       )
-      .bind(id, userId, neighborhoodId, submissionId, amount, now, null)
+      .bind(id, userId, neighborhoodId, submissionId, amount, now, userId)
       .run();
   } catch (err) {
     // Swallow unique-constraint violations — means coins were already awarded

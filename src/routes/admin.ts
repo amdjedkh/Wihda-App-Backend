@@ -122,23 +122,22 @@ admin.post("/campaigns", async (c) => {
            (id, neighborhood_id, title, description, organizer, location,
             start_dt, end_dt, url, image_url,
             source, source_identifier, status, last_seen_at,
-            coin_reward, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin', ?, 'active', ?, ?, ?, ?)`,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, 'active', ?, ?, ?)`,
       )
       .bind(
         id,
         n.id,
         title,
-        description  ?? null,
-        organizer    ?? null,
-        location     ?? null,
+        description ?? null,
+        organizer   ?? null,
+        location    ?? null,
         start_dt,
-        end_dt       ?? null,
-        url          ?? null,
-        image_url    ?? null,
-        title,          // source_identifier
-        now,            // last_seen_at
-        parseInt(coin_reward) || 50,
+        end_dt      ?? null,
+        url         ?? null,
+        image_url   ?? null,
+        title,   // source_identifier
+        now,     // last_seen_at
         now,
         now,
       )

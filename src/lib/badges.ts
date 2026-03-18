@@ -5,6 +5,15 @@
 
 import type { D1Database } from "@cloudflare/workers-types";
 
+const BADGE_LABEL: Record<string, string> = {
+  food_saver:        'Food Saver',
+  local_giver:       'Local Giver',
+  active_member:     'Active Member',
+  cleanify_champion: 'Cleanify Champion',
+  citizen_of_month:  'Citizen of the Month',
+  top_helper:        'Top Helper',
+};
+
 export async function checkAndAwardBadges(
   db: D1Database,
   userId: string,
@@ -32,8 +41,8 @@ export async function checkAndAwardBadges(
     };
 
     const badgesResult = await db.prepare(
-      "SELECT key, requirement_type, requirement_value FROM badges"
-    ).all<{ key: string; requirement_type: string; requirement_value: number }>();
+      "SELECT key, name, requirement_type, requirement_value FROM badges"
+    ).all<{ key: string; name: string; requirement_type: string; requirement_value: number }>();
 
     const earnedResult = await db.prepare(
       "SELECT badge_key FROM user_badges WHERE user_id = ?"
@@ -51,6 +60,19 @@ export async function checkAndAwardBadges(
       await db.prepare(
         "INSERT OR IGNORE INTO user_badges (id, user_id, badge_key, earned_at) VALUES (?, ?, ?, datetime('now'))"
       ).bind(crypto.randomUUID(), userId, badge.key).run();
+
+      // Store in-app notification
+      const badgeName = BADGE_LABEL[badge.key] || badge.name;
+      await db.prepare(
+        "INSERT INTO notifications (id, user_id, type, title, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))"
+      ).bind(
+        crypto.randomUUID(),
+        userId,
+        'badge_earned',
+        '🏅 Badge Unlocked!',
+        `You earned the "${badgeName}" badge. Keep it up!`,
+        JSON.stringify({ badge_key: badge.key, badge_name: badgeName }),
+      ).run();
     }
   } catch (err) {
     console.error("checkAndAwardBadges error:", err);

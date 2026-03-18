@@ -895,7 +895,7 @@ cleanify.get("/active", authMiddleware, async (c) => {
 
 // ─── POST /v1/cleanify/:id/abandon ───────────────────────────────────────────
 /**
- * Abandons a draft_before or in_progress submission owned by the user.
+ * Abandons a draft_before, in_progress, or pending_review submission owned by the user.
  */
 cleanify.post("/:id/abandon", authMiddleware, async (c) => {
   const auth = getAuthContext(c);
@@ -906,8 +906,8 @@ cleanify.post("/:id/abandon", authMiddleware, async (c) => {
 
   if (!submission) return errorResponse("NOT_FOUND", "Submission not found", 404);
   if (submission.user_id !== auth.userId) return errorResponse("FORBIDDEN", "Not your submission", 403);
-  if (!["draft_before", "in_progress"].includes(submission.status)) {
-    return errorResponse("INVALID_STATE", "Only active submissions can be abandoned", 400);
+  if (!["draft_before", "in_progress", "pending_review"].includes(submission.status)) {
+    return errorResponse("INVALID_STATE", "Only active or pending submissions can be cancelled", 400);
   }
 
   await c.env.DB.prepare(

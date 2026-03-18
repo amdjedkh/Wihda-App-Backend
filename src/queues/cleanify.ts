@@ -34,9 +34,9 @@ interface GeminiResponse {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-1.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash";
 const GEMINI_API_BASE =
-  "https://generativelanguage.googleapis.com/v1/models";
+  "https://generativelanguage.googleapis.com/v1beta/models";
 const CONFIDENCE_THRESHOLD = 0.7;
 
 const SYSTEM_PROMPT = `You are a photo verification assistant for Wihda, a civic neighbourhood application.
@@ -147,6 +147,7 @@ async function runGeminiCleanifyCheck(
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 512,
+        responseMimeType: "application/json",
       },
     }),
   });

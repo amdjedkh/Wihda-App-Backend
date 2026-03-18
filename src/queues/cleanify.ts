@@ -34,7 +34,7 @@ interface GeminiResponse {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash-lite";
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -154,7 +154,9 @@ async function runGeminiCleanifyCheck(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${text}`);
+    const err = new Error(`Gemini API error ${response.status}: ${text}`);
+    (err as any).status = response.status;
+    throw err;
   }
 
   const geminiData = (await response.json()) as GeminiResponse;
@@ -420,9 +422,16 @@ export async function handleCleanifyQueue(
       // Photos are kept in R2 so users can view them on the result page.
 
       message.ack();
-    } catch (err) {
-      console.error(`[cleanify] FAILED for submission ${submission_id}:`, String(err));
-      message.retry();
+    } catch (err: any) {
+      const status = err?.status;
+      if (status === 429) {
+        // Daily quota exceeded — retry later (queue will back off automatically)
+        console.warn(`[cleanify] Rate limited for submission ${submission_id} — will retry`);
+        message.retry({ delaySeconds: 3600 }); // retry in 1 hour
+      } else {
+        console.error(`[cleanify] FAILED for submission ${submission_id}:`, String(err));
+        message.retry();
+      }
     }
   }
 }

@@ -37,6 +37,7 @@ import { handleCleanifyQueue } from "./queues/cleanify";
 import contactRoutes from "./routes/contact";
 import notificationRoutes from "./routes/notifications";
 import storeRoutes from "./routes/store";
+import adminRoutes from "./routes/admin";
 
 // Import Durable Object
 import { ChatThreadDurableObject } from "./durable-objects/ChatThreadDurableObject";
@@ -105,6 +106,7 @@ app.route("/v1/campaigns", campaignsRoutes);
 app.route("/v1/uploads", uploadsRoutes);
 app.route("/v1/notifications", notificationRoutes);
 app.route("/v1/store", storeRoutes);
+app.route("/v1/admin", adminRoutes);
 
 // ─── 404 / error handlers ─────────────────────────────────────────────────────
 

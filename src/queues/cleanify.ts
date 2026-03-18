@@ -147,7 +147,6 @@ async function runGeminiCleanifyCheck(
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 512,
-        responseMimeType: "application/json",
       },
     }),
   });

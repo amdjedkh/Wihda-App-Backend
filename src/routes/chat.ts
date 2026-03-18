@@ -222,6 +222,7 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
   let giverId: string | null = null;
   let receiverId: string | null = null;
   let offerIdForDeletion: string | null = null;
+  let needIdForDeletion: string | null = null;
 
   if (threadAny.offer_id) {
     const offer = await getLeftoverOfferById(c.env.DB, threadAny.offer_id);
@@ -239,6 +240,7 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
       giverId = thread.participant_1_id === need.user_id
         ? thread.participant_2_id
         : thread.participant_1_id;
+      needIdForDeletion = need.id;
     }
   }
 
@@ -317,11 +319,16 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
       "UPDATE chat_threads SET status = 'closed', confirmation_state = 'completed', closed_at = ? WHERE id = ?"
     ).bind(toISODateString(), threadId).run();
 
-    // Mark offer as completed (GIVE thread only)
+    // Mark offer/need as closed
     if (offerIdForDeletion) {
       await c.env.DB.prepare(
         "UPDATE leftover_offers SET status = 'closed', updated_at = ? WHERE id = ?"
       ).bind(toISODateString(), offerIdForDeletion).run();
+    }
+    if (needIdForDeletion) {
+      await c.env.DB.prepare(
+        "UPDATE leftover_needs SET status = 'closed', updated_at = ? WHERE id = ?"
+      ).bind(toISODateString(), needIdForDeletion).run();
     }
 
     // Award badges

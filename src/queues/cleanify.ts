@@ -34,7 +34,7 @@ interface GeminiResponse {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-2.0-flash-lite";
+const GEMINI_MODEL = "gemini-1.5-flash";
 const GEMINI_API_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -371,11 +371,13 @@ export async function handleCleanifyQueue(
       }
 
       // ── 4. Run Gemini ────────────────────────────────────────────────────────
+      console.log(`[cleanify] Running AI check for submission ${submission_id} with model ${GEMINI_MODEL}`);
       const result = await runGeminiCleanifyCheck(
         env.GEMINI_API_KEY,
         beforeImage,
         afterImage,
       );
+      console.log(`[cleanify] AI result for ${submission_id}: approved=${result.approved} confidence=${result.confidence}`);
 
       // ── 5. Award coins first so they are in DB before status becomes visible ─
       const coinAmount = await getCoinRewardAmount(env.DB);
@@ -419,7 +421,7 @@ export async function handleCleanifyQueue(
 
       message.ack();
     } catch (err) {
-      console.error(`run_ai_check error for submission ${submission_id}:`, err);
+      console.error(`[cleanify] FAILED for submission ${submission_id}:`, String(err));
       message.retry();
     }
   }

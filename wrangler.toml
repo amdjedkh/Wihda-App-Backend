@@ -83,7 +83,8 @@ dead_letter_queue = "wihda-verification-dlq"
 [[queues.consumers]]
 queue = "wihda-cleanify-queue"
 max_batch_size = 1
-max_retries = 3
+max_batch_timeout = 30
+max_retries = 5
 
 # Durable Objects for Chat
 [[durable_objects.bindings]]

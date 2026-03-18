@@ -127,16 +127,16 @@ async function getActiveSubmission(
   db: D1Database,
   userId: string,
   neighborhoodId: string,
-): Promise<{ id: string; status: string } | null> {
+): Promise<{ id: string; status: string; before_uploaded_at: string | null; review_note: string | null; coins_awarded: number | null } | null> {
   return db
     .prepare(
-      `SELECT id, status FROM cleanify_submissions
+      `SELECT id, status, before_uploaded_at, review_note, coins_awarded FROM cleanify_submissions
        WHERE user_id = ? AND neighborhood_id = ?
-         AND status IN ('draft_before', 'in_progress')
+         AND status IN ('draft_before', 'in_progress', 'pending_review')
        LIMIT 1`,
     )
     .bind(userId, neighborhoodId)
-    .first<{ id: string; status: string }>();
+    .first<{ id: string; status: string; before_uploaded_at: string | null; review_note: string | null; coins_awarded: number | null }>();
 }
 
 /**

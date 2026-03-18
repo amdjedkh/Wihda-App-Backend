@@ -28,6 +28,7 @@ interface ScrapedEvent {
   images?: string[];
   contact_phone?: string;
   contact_email?: string;
+  coin_reward?: number;
 }
 
 // ─── Sources ──────────────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ function buildFallbackEvents(): ScrapedEvent[] {
       end_dt: new Date(nextWeek.getTime() + 3 * 60 * 60 * 1000).toISOString(),
       images: [],
       contact_email: "community@wihdaapp.com",
+      coin_reward: 100,
     },
     {
       title: "Tree Planting Campaign",
@@ -82,6 +84,7 @@ function buildFallbackEvents(): ScrapedEvent[] {
       start_dt: nextMonth.toISOString(),
       images: [],
       contact_email: "community@wihdaapp.com",
+      coin_reward: 150,
     },
   ];
 }
@@ -298,7 +301,7 @@ async function upsertCampaign(db: D1Database, neighborhoodId: string, event: Scr
           location, start_dt, end_dt, url, image_url, images_json,
           contact_phone, contact_email,
           source, source_identifier, status, last_seen_at, coin_reward, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scrape', ?, 'active', ?, 50, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scrape', ?, 'active', ?, ?, ?, ?)
        ON CONFLICT(source, url) DO UPDATE SET
          title          = excluded.title,
          subtitle       = excluded.subtitle,
@@ -332,8 +335,9 @@ async function upsertCampaign(db: D1Database, neighborhoodId: string, event: Scr
       imagesJson,
       event.contact_phone  ?? null,
       event.contact_email  ?? null,
-      event.url ?? event.title,   // source_identifier
-      now,                         // last_seen_at
+      event.url ?? event.title,        // source_identifier
+      now,                              // last_seen_at
+      event.coin_reward ?? 50,         // coin_reward
       now,
       now,
     )
@@ -387,13 +391,19 @@ Return ONLY a valid JSON array (no markdown fences) where each item has:
   "image_url": "string or null - absolute URL to primary image",
   "images": ["string"] or [] - up to 3 absolute image URLs,
   "contact_phone": "string or null",
-  "contact_email": "string or null"
+  "contact_email": "string or null",
+  "coin_reward": integer between 50 and 500 - assign based on activity complexity:
+    50–100: simple local tasks (short cleanup, small awareness stand, one-hour activity)
+    100–200: moderate effort (half-day cleanup, food/supply donation drive, tree planting)
+    200–350: significant commitment (full-day event, multi-location campaign, training workshop)
+    350–500: high complexity or multi-day (national campaign, major environmental project, multi-day youth programme)
 }
 
 Rules:
 - Skip items where you cannot determine a start date.
 - Normalize dates to ISO 8601 (UTC+1 / Africa/Algiers if no timezone).
 - Only extract what is explicitly on the page.
+- coin_reward must always be an integer, never null, minimum 50, maximum 500.
 - If no events found return [].
 
 Page content:
@@ -442,6 +452,9 @@ ${markdown.slice(0, 14000)}`;
       if (imageUrl && !images.includes(imageUrl)) images.unshift(imageUrl);
       if (images.length > 3) images.length = 3;
 
+      const rawCoins = parseInt(item.coin_reward);
+      const coinReward = isNaN(rawCoins) ? 50 : Math.min(500, Math.max(50, rawCoins));
+
       valid.push({
         title:          item.title.trim(),
         subtitle:       str(item.subtitle),
@@ -456,6 +469,7 @@ ${markdown.slice(0, 14000)}`;
         images,
         contact_phone:  str(item.contact_phone),
         contact_email:  str(item.contact_email),
+        coin_reward:    coinReward,
       });
     }
     return valid;

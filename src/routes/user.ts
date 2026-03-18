@@ -37,6 +37,7 @@ const updateProfileSchema = z.object({
   language_preference: z.string().length(2).optional(),
   fcm_token: z.string().optional(),
   photo_url: z.string().url().optional(),
+  bio: z.string().max(200).optional(),
 });
 
 /**
@@ -69,6 +70,7 @@ user.get("/", authMiddleware, async (c) => {
     phone: currentUser.phone,
     display_name: currentUser.display_name,
     photo_url: currentUser.photo_url,
+    bio: (currentUser as any).bio ?? null,
     role: currentUser.role,
     status: currentUser.status,
     verification_status: currentUser.verification_status,
@@ -324,6 +326,7 @@ user.patch("/", authMiddleware, requireVerified, async (c) => {
       languagePreference: data.language_preference,
       fcmToken: data.fcm_token,
       photoUrl: data.photo_url,
+      bio: data.bio,
     });
 
     if (!updatedUser) {
@@ -340,6 +343,24 @@ user.patch("/", authMiddleware, requireVerified, async (c) => {
     console.error("Update profile error:", error);
     return errorResponse("INTERNAL_ERROR", "Failed to update profile", 500);
   }
+});
+
+/**
+ * DELETE /v1/me
+ * Soft-delete the authenticated user's account.
+ * Sets status to 'deleted', preventing future logins.
+ */
+user.delete("/", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  await c.env.DB.prepare(
+    "UPDATE users SET status = 'deleted', updated_at = datetime('now') WHERE id = ?",
+  ).bind(authContext.userId).run();
+
+  return successResponse({ deleted: true });
 });
 
 /**

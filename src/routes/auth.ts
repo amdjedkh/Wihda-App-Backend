@@ -197,6 +197,9 @@ auth.post("/login", async (c) => {
     }
 
     // ── Account status gate ───────────────────────────────────────────────────
+    if (user.status === "deleted") {
+      return errorResponse("ACCOUNT_DELETED", "This account has been deleted", 403);
+    }
     if (user.status === "banned") {
       return errorResponse(
         "ACCOUNT_BANNED",

@@ -105,6 +105,7 @@ export async function updateUser(
     languagePreference?: string;
     fcmToken?: string;
     photoUrl?: string;
+    bio?: string;
   },
 ): Promise<User | null> {
   const updates: string[] = [];
@@ -125,6 +126,10 @@ export async function updateUser(
   if (data.photoUrl !== undefined) {
     updates.push("photo_url = ?");
     values.push(data.photoUrl);
+  }
+  if (data.bio !== undefined) {
+    updates.push("bio = ?");
+    values.push(data.bio);
   }
 
   if (updates.length === 0) return getUserById(db, id);

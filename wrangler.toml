@@ -1,126 +1,49 @@
-# Wihda Backend - Cloudflare Workers Configuration
-# API versioned at /v1/*
-
 name = "wihda-backend"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Account ID - replace with your Cloudflare account ID
-# account_id = "your-account-id"
+account_id = "b725524f83e2be19d8b2e26f4bed5239"
 
-# Development settings
 [dev]
 port = 8787
 local_protocol = "http"
 
-# D1 Database binding
+# D1 Database
 [[d1_databases]]
 binding = "DB"
 database_name = "wihda-db"
-database_id = "2969f23e-377f-4c34-8be8-d991f99a62a1" # Replace with actual D1 database ID
+database_id = "b5e14395-6fa1-4733-b28c-cb64c4aeb540"
 
-# R2 Storage binding for images
-[[r2_buckets]]
-binding = "STORAGE"
-bucket_name = "wihda-uploads"
-
-# KV Namespace for rate limiting and caching
+# KV Namespace
 [[kv_namespaces]]
 binding = "KV"
-id = "756ad63c190d48848456907a9dc9e69b" # Replace with actual KV namespace ID
+id = "0b220ac5131b4db589b0bff10e02dd23"
 
-# Queue for matching jobs
-[[queues.producers]]
-queue = "wihda-matching-queue"
-binding = "MATCHING_QUEUE"
-
-# Queue for campaign ingestion
-[[queues.producers]]
-queue = "wihda-campaign-queue"
-binding = "CAMPAIGN_QUEUE"
-
-# Queue for notifications
-[[queues.producers]]
-queue = "wihda-notification-queue"
-binding = "NOTIFICATION_QUEUE"
-
-# Queue for verification
-[[queues.producers]]
-queue = "wihda-verification-queue"
-binding = "VERIFICATION_QUEUE"
-
-[[queues.producers]]
-queue = "wihda-cleanify-queue"
-binding = "CLEANIFY_QUEUE"
-
-# Queue consumers
-[[queues.consumers]]
-queue = "wihda-matching-queue"
-max_batch_size = 10
-max_batch_timeout = 30
-max_retries = 3
-
-[[queues.consumers]]
-queue = "wihda-campaign-queue"
-max_batch_size = 10
-max_batch_timeout = 60
-max_retries = 3
-
-[[queues.consumers]]
-queue = "wihda-notification-queue"
-max_batch_size = 50
-max_batch_timeout = 10
-max_retries = 5
-
-[[queues.consumers]]
-queue = "wihda-verification-queue"
-max_batch_size = 5
-max_batch_timeout = 30
-max_retries = 3
-dead_letter_queue = "wihda-verification-dlq"
-
-[[queues.consumers]]
-queue = "wihda-cleanify-queue"
-max_batch_size = 1
-max_batch_timeout = 30
-max_retries = 5
+# R2 Storage — enable R2 in Cloudflare dashboard first, then uncomment
+# [[r2_buckets]]
+# binding = "STORAGE"
+# bucket_name = "wihda-uploads"
 
 # Durable Objects for Chat
 [[durable_objects.bindings]]
 name = "CHAT_DO"
 class_name = "ChatThreadDurableObject"
 
-# Durable Objects migrations (new_sqlite_classes required on free plan)
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatThreadDurableObject"]
 
-# Cron triggers for scheduled jobs
-[triggers]
-crons = ["0 */12 * * *"]  # Every 12 hours for campaign ingestion
-
-# Cloudflare Workers AI (for activity image generation)
+# Cloudflare Workers AI
 [ai]
 binding = "AI"
 
-# Non-sensitive environment variables only.
-# Sensitive values (JWT_SECRET, GEMINI_API_KEY, etc.) must be set with:
-#   wrangler secret put <NAME>
+# Cron triggers
+[triggers]
+crons = ["0 */12 * * *"]
+
 [vars]
 ENVIRONMENT = "production"
 RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
 FRONTEND_URL = "https://app.wihdaapp.com"
 API_URL = "https://api.wihdaapp.com"
-
-# Production overrides
-[env.production]
-name = "wihda-backend-prod"
-[env.production.vars]
-ENVIRONMENT = "production"
-
-# Staging environment
-[env.staging]
-name = "wihda-backend-staging"
-[env.staging.vars]
-ENVIRONMENT = "staging"

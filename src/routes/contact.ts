@@ -42,6 +42,103 @@ const contactSchema = z.discriminatedUnion("type", [
   partnerSchema,
 ]);
 
+// ─── Email notification ───────────────────────────────────────────────────────
+
+async function sendContactNotification(
+  env: Env,
+  data: z.infer<typeof contactSchema>,
+  submissionId: string,
+): Promise<void> {
+  let subject: string;
+  let html: string;
+
+  if (data.type === "citizen") {
+    subject = `[Wihda Contact] ${data.topic} — ${data.name}`;
+    html = `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a">
+        <h2 style="border-bottom:1px solid #e5e7eb;padding-bottom:12px">
+          New citizen contact form submission
+        </h2>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+          <tr>
+            <td style="padding:8px 0;color:#6b7280;width:120px">Submission ID</td>
+            <td style="padding:8px 0;font-family:monospace">${submissionId}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Name</td>
+            <td style="padding:8px 0">${data.name}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Email</td>
+            <td style="padding:8px 0"><a href="mailto:${data.email}">${data.email}</a></td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Topic</td>
+            <td style="padding:8px 0">${data.topic}</td>
+          </tr>
+        </table>
+        <h3 style="color:#374151;margin-bottom:8px">Message</h3>
+        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;
+                    padding:16px;white-space:pre-wrap;font-size:14px;line-height:1.6">
+${data.message}
+        </div>
+      </div>
+    `;
+  } else {
+    subject = `[Wihda Contact] Partner inquiry — ${data.organization}`;
+    html = `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1a1a">
+        <h2 style="border-bottom:1px solid #e5e7eb;padding-bottom:12px">
+          New partner contact form submission
+        </h2>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+          <tr>
+            <td style="padding:8px 0;color:#6b7280;width:140px">Submission ID</td>
+            <td style="padding:8px 0;font-family:monospace">${submissionId}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Organization</td>
+            <td style="padding:8px 0">${data.organization}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Contact person</td>
+            <td style="padding:8px 0">${data.contactPerson}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#6b7280">Email</td>
+            <td style="padding:8px 0"><a href="mailto:${data.email}">${data.email}</a></td>
+          </tr>
+        </table>
+        <h3 style="color:#374151;margin-bottom:8px">Proposal</h3>
+        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;
+                    padding:16px;white-space:pre-wrap;font-size:14px;line-height:1.6">
+${data.proposal}
+        </div>
+      </div>
+    `;
+  }
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.RESEND_FROM_EMAIL,
+      to: ["contact@wihdaapp.com"],
+      reply_to: data.email,
+      subject,
+      html,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("[contact] Resend notification failed:", res.status, text);
+  }
+}
+
 // ─── POST /v1/contact ─────────────────────────────────────────────────────────
 
 /**
@@ -137,6 +234,9 @@ contact.post("/", async (c) => {
       )
       .run();
   }
+
+  // Send email notification (non-blocking — failure does not affect response)
+  c.executionCtx.waitUntil(sendContactNotification(c.env, data, id));
 
   return c.json(
     { success: true, data: { id, type: data.type, created_at: now } },

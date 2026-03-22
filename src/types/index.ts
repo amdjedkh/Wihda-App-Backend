@@ -44,8 +44,8 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
 
-  // ── Frontend URL (used for OAuth redirect) ────────────────────────────────
-  FRONTEND_URL?: string;
+  FRONTEND_URL?: string; // https://app.wihdaapp.com
+  API_URL?: string;      // https://api.wihdaapp.com
 }
 
 // ============================================

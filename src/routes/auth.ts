@@ -422,24 +422,32 @@ auth.post("/refresh", async (c) => {
 // ─── GET /v1/auth/google ──────────────────────────────────────────────────────
 
 /**
- * Redirects the user to Google's OAuth consent screen.
- * Stores a random state value in KV for CSRF protection (TTL: 10 minutes).
+ * Starts Google OAuth.
+ * Pass ?session_id=XXX for the native Capacitor flow (Browser.open).
+ * The redirect_uri always points to THIS backend — backend owns the callback.
  */
 auth.get("/google", async (c) => {
   if (!c.env.GOOGLE_CLIENT_ID) {
     return errorResponse("NOT_CONFIGURED", "Google OAuth is not configured", 503);
   }
 
+  const sessionId = c.req.query("session_id") || "";
   const state = crypto.randomUUID();
-  await c.env.KV.put(`oauth_state:${state}`, "1", { expirationTtl: 600 });
 
-  const redirectUri = `${c.env.FRONTEND_URL || "http://localhost:5173"}/auth/google/callback`;
+  await c.env.KV.put(
+    `oauth_state:${state}`,
+    JSON.stringify({ session_id: sessionId }),
+    { expirationTtl: 600 },
+  );
+
+  const apiUrl = c.env.API_URL || "https://api.wihdaapp.com";
+  const redirectUri = `${apiUrl}/v1/auth/google/callback`;
 
   const params = new URLSearchParams({
     client_id: c.env.GOOGLE_CLIENT_ID,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: "email profile",
+    scope: "openid email profile",
     state,
     access_type: "offline",
     prompt: "select_account",
@@ -450,42 +458,45 @@ auth.get("/google", async (c) => {
   );
 });
 
-// ─── POST /v1/auth/google/callback ───────────────────────────────────────────
+// ─── GET /v1/auth/google/callback ────────────────────────────────────────────
 
 /**
- * Handles the Google OAuth callback.
- * Accepts { code, state } as JSON body (sent by the frontend after redirect).
- * - Verifies state (CSRF check)
- * - Exchanges code for tokens
- * - Fetches user info from Google
- * - Finds or creates a local user
- * - Returns access + refresh tokens
+ * Google redirects here after the user authorises.
+ * Backend owns the full exchange — no code ever touches the frontend.
+ *
+ * Web flow   → redirects to https://app.wihdaapp.com/auth/google/callback?access_token=...
+ * Native flow → stores tokens in KV under session_id, redirects to
+ *               https://app.wihdaapp.com/auth/google/callback?native=1&success=1
  */
-auth.post("/google/callback", async (c) => {
+auth.get("/google/callback", async (c) => {
   if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) {
     return errorResponse("NOT_CONFIGURED", "Google OAuth is not configured", 503);
   }
 
+  const frontendUrl = c.env.FRONTEND_URL || "https://app.wihdaapp.com";
+  const apiUrl      = c.env.API_URL      || "https://api.wihdaapp.com";
+  const redirectUri = `${apiUrl}/v1/auth/google/callback`;
+
+  const code       = c.req.query("code");
+  const state      = c.req.query("state");
+  const errorParam = c.req.query("error");
+
+  if (errorParam || !code || !state) {
+    return c.redirect(`${frontendUrl}/auth/google/callback?error=access_denied`);
+  }
+
   try {
-    const body = await c.req.json();
-    const { code, state } = body as { code?: string; state?: string };
-
-    if (!code) {
-      return errorResponse("VALIDATION_ERROR", "Authorization code is required", 400);
-    }
-    if (!state) {
-      return errorResponse("VALIDATION_ERROR", "State parameter is required", 400);
-    }
-
-    // ── CSRF state verification ───────────────────────────────────────────────
+    // ── CSRF state check ─────────────────────────────────────────────────────
     const storedState = await c.env.KV.get(`oauth_state:${state}`);
     if (!storedState) {
-      return errorResponse("INVALID_STATE", "Invalid or expired OAuth state", 400);
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=invalid_state`);
     }
+    const { session_id } = JSON.parse(storedState) as { session_id: string };
     await c.env.KV.delete(`oauth_state:${state}`);
 
+    const isNative = session_id.length > 0;
+
     // ── Exchange code for Google tokens ───────────────────────────────────────
-    const redirectUri = `${c.env.FRONTEND_URL || "http://localhost:5173"}/auth/google/callback`;
 
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
@@ -500,59 +511,57 @@ auth.post("/google/callback", async (c) => {
     });
 
     if (!tokenRes.ok) {
-      const err = await tokenRes.text();
-      console.error("Google token exchange failed:", err);
-      return errorResponse("OAUTH_ERROR", "Failed to exchange authorization code", 400);
+      console.error("Google token exchange failed:", await tokenRes.text());
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=token_exchange_failed`);
     }
 
-    const tokenData = (await tokenRes.json()) as {
-      access_token: string;
-      id_token?: string;
-      error?: string;
-    };
-
-    if (tokenData.error) {
-      return errorResponse("OAUTH_ERROR", tokenData.error, 400);
+    const tokenData = (await tokenRes.json()) as { access_token: string; error?: string };
+    if (tokenData.error || !tokenData.access_token) {
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=token_exchange_failed`);
     }
 
     // ── Fetch Google user info ────────────────────────────────────────────────
-    const userInfoRes = await fetch(
-      "https://www.googleapis.com/oauth2/v3/userinfo",
-      {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` },
-      },
-    );
-
+    const userInfoRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
     if (!userInfoRes.ok) {
-      return errorResponse("OAUTH_ERROR", "Failed to fetch Google user info", 400);
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=userinfo_failed`);
     }
 
     const googleUser = (await userInfoRes.json()) as {
-      sub: string;
-      email: string;
-      name: string;
-      picture?: string;
-      email_verified?: boolean;
+      sub: string; email: string; name: string; picture?: string;
     };
-
     if (!googleUser.email) {
-      return errorResponse("OAUTH_ERROR", "Google account has no email address", 400);
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=no_email`);
     }
 
     // ── Find or create local user ─────────────────────────────────────────────
     let user = await getUserByGoogleId(c.env.DB, googleUser.sub);
 
     if (!user) {
-      // Try to find by email — link the Google account to existing user
       user = await getUserByEmail(c.env.DB, googleUser.email);
       if (user) {
-        await linkGoogleId(c.env.DB, user.id, googleUser.sub, googleUser.picture);
+        if ((user as any).deleted_at) {
+          // Reactivate soft-deleted account — same person signing back in
+          await c.env.DB.prepare(
+            `UPDATE users SET deleted_at = NULL, google_id = ?,
+             photo_url = COALESCE(photo_url, ?), email_verified = 1,
+             verification_status = 'verified', updated_at = datetime('now') WHERE id = ?`
+          ).bind(googleUser.sub, googleUser.picture || null, user.id).run();
+        } else {
+          await linkGoogleId(c.env.DB, user.id, googleUser.sub, googleUser.picture);
+        }
         user = await getUserById(c.env.DB, user.id);
       }
+    } else if ((user as any).deleted_at) {
+      await c.env.DB.prepare(
+        `UPDATE users SET deleted_at = NULL, email_verified = 1,
+         verification_status = 'verified', updated_at = datetime('now') WHERE id = ?`
+      ).bind(user.id).run();
+      user = await getUserById(c.env.DB, user.id);
     }
 
     if (!user) {
-      // Create a brand-new account; Google accounts are pre-verified
       user = await createUserWithGoogle(c.env.DB, {
         email: googleUser.email,
         googleId: googleUser.sub,
@@ -561,24 +570,12 @@ auth.post("/google/callback", async (c) => {
       });
     }
 
-    if (!user) {
-      return errorResponse("INTERNAL_ERROR", "Failed to resolve user account", 500);
+    if (!user || user.status === "banned" || user.status === "suspended") {
+      return c.redirect(`${frontendUrl}/auth/google/callback?error=account_error`);
     }
 
-    // ── Account status gate ───────────────────────────────────────────────────
-    if ((user as any).deleted_at) {
-      return errorResponse("ACCOUNT_DELETED", "This account has been deleted", 403);
-    }
-    if (user.status === "banned") {
-      return errorResponse("ACCOUNT_BANNED", "Your account has been banned", 403);
-    }
-    if (user.status === "suspended") {
-      return errorResponse("ACCOUNT_SUSPENDED", "Your account has been temporarily suspended", 403);
-    }
-
-    // ── Issue tokens ──────────────────────────────────────────────────────────
+    // ── Issue Wihda JWT tokens ────────────────────────────────────────────────
     const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
-
     const tokenPayload = {
       sub: user.id,
       role: user.role,
@@ -587,7 +584,7 @@ auth.post("/google/callback", async (c) => {
       scope: "full",
     };
 
-    const accessToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 24);
+    const accessToken  = await createJWT(tokenPayload, c.env.JWT_SECRET, 24);
     const refreshToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 168);
 
     const refreshPayload = await verifyJWT(refreshToken, c.env.JWT_SECRET);
@@ -597,24 +594,46 @@ auth.post("/google/callback", async (c) => {
       });
     }
 
-    const response: LoginResponse = {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      expires_in: 86400,
-      user: {
-        id: user.id,
-        display_name: user.display_name,
-        role: user.role,
-        created_at: user.created_at,
-        verification_status: user.verification_status,
-      },
-    };
+    // ── Redirect based on flow ────────────────────────────────────────────────
+    if (isNative) {
+      // Store tokens in KV — native app polls GET /v1/auth/google/session
+      await c.env.KV.put(
+        `oauth_session:${session_id}`,
+        JSON.stringify({ access_token: accessToken, refresh_token: refreshToken }),
+        { expirationTtl: 300 },
+      );
+      return c.redirect(`${frontendUrl}/auth/google/callback?native=1&success=1`);
+    }
 
-    return successResponse(response);
-  } catch (error) {
-    console.error("Google OAuth callback error:", error);
-    return errorResponse("INTERNAL_ERROR", "Google authentication failed", 500);
+    // Web: send tokens in URL, frontend stores them
+    const params = new URLSearchParams({ access_token: accessToken, refresh_token: refreshToken });
+    return c.redirect(`${frontendUrl}/auth/google/callback?${params.toString()}`);
+
+  } catch (err) {
+    console.error("Google callback error:", err);
+    const frontendUrl = c.env.FRONTEND_URL || "https://app.wihdaapp.com";
+    return c.redirect(`${frontendUrl}/auth/google/callback?error=internal_error`);
   }
+});
+
+// ─── GET /v1/auth/google/session ─────────────────────────────────────────────
+
+/**
+ * Native app polls this while Browser is open.
+ * Returns tokens once Google auth completes, then deletes the entry (one-time).
+ */
+auth.get("/google/session", async (c) => {
+  const id = c.req.query("id");
+  if (!id) return errorResponse("MISSING_ID", "Session ID is required", 400);
+
+  const stored = await c.env.KV.get(`oauth_session:${id}`);
+  if (!stored) return c.json({ success: false, pending: true }, 202);
+
+  await c.env.KV.delete(`oauth_session:${id}`);
+  const { access_token, refresh_token } = JSON.parse(stored) as {
+    access_token: string; refresh_token: string;
+  };
+  return successResponse({ access_token, refresh_token });
 });
 
 // ─── Forgot Password helpers ──────────────────────────────────────────────────

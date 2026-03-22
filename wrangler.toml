@@ -110,7 +110,8 @@ binding = "AI"
 [vars]
 ENVIRONMENT = "production"
 RESEND_FROM_EMAIL = "Wihda <noreply@wihdaapp.com>"
-WORKERS_BASE_URL = "https://wihda-backend.khamjed123.workers.dev"
+FRONTEND_URL = "https://app.wihdaapp.com"
+API_URL = "https://api.wihdaapp.com"
 
 # Production overrides
 [env.production]

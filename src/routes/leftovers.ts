@@ -76,6 +76,7 @@ const createOfferSchema = z.object({
   title: z.string().min(3).max(100),
   description: z.string().max(1000).optional(),
   image_url: z.string().max(2000).optional(),
+  image_urls: z.array(z.string().max(2000)).max(5).optional(),
   survey: surveySchema,
   quantity: z.number().int().min(1).max(10).default(1),
   pickup_window_start: z.string().datetime().optional(),
@@ -101,11 +102,32 @@ function mapOffer(offer: any, user: any) {
   const survey = (() => {
     try { return JSON.parse(offer.survey_json); } catch { return {}; }
   })();
+
+  // image_url may be a plain URL string or a JSON array of URLs
+  let imageUrl: string | null = null;
+  let imageUrls: string[] = [];
+  if (offer.image_url) {
+    try {
+      const parsed = JSON.parse(offer.image_url);
+      if (Array.isArray(parsed)) {
+        imageUrls = parsed.filter(Boolean);
+        imageUrl = imageUrls[0] ?? null;
+      } else {
+        imageUrl = offer.image_url;
+        imageUrls = [offer.image_url];
+      }
+    } catch {
+      imageUrl = offer.image_url;
+      imageUrls = [offer.image_url];
+    }
+  }
+
   return {
     id: offer.id,
     title: offer.title,
     description: offer.description ?? null,
-    image_url: offer.image_url ?? null,
+    image_url: imageUrl,
+    image_urls: imageUrls,
     survey,
     quantity: offer.quantity,
     status: offer.status,
@@ -163,12 +185,17 @@ leftovers.post(
       const data = validation.data;
       const expiryAt = toISODateString(addHours(new Date(), data.expiry_hours));
 
+      // Store image_urls as JSON array, or fall back to single image_url
+      const imageUrlToStore = data.image_urls && data.image_urls.length > 0
+        ? JSON.stringify(data.image_urls)
+        : data.image_url;
+
       const offer = await createLeftoverOffer(c.env.DB, {
         userId: authContext.userId,
         neighborhoodId: authContext.neighborhoodId,
         title: data.title,
         description: data.description,
-        imageUrl: data.image_url,
+        imageUrl: imageUrlToStore,
         surveyJson: JSON.stringify(data.survey),
         quantity: data.quantity,
         pickupWindowStart: data.pickup_window_start,
@@ -176,13 +203,15 @@ leftovers.post(
         expiryAt,
       });
 
-      // Queue matching job
-      await c.env.MATCHING_QUEUE.send({
-        type: "match_offer",
-        offer_id: offer.id,
-        neighborhood_id: authContext.neighborhoodId,
-        timestamp: toISODateString(),
-      });
+      // Queue matching job (optional — may not be provisioned)
+      if (c.env.MATCHING_QUEUE) {
+        await c.env.MATCHING_QUEUE.send({
+          type: "match_offer",
+          offer_id: offer.id,
+          neighborhood_id: authContext.neighborhoodId,
+          timestamp: toISODateString(),
+        });
+      }
 
       // Check & award badges asynchronously
       checkAndAwardBadges(c.env.DB, authContext.userId);
@@ -356,14 +385,16 @@ leftovers.post("/offers/:id/request", authMiddleware, requireNeighborhood, async
     .run();
 
   // Notify the offer owner
-  await c.env.NOTIFICATION_QUEUE.send({
-    user_id: offer.user_id,
-    type: "leftover_request",
-    title: "Someone wants your offer!",
-    body: `${requesterName} is interested in "${offer.title}"`,
-    data: { thread_id: thread.id, offer_id: offerId },
-    timestamp: toISODateString(),
-  });
+  if (c.env.NOTIFICATION_QUEUE) {
+    await c.env.NOTIFICATION_QUEUE.send({
+      user_id: offer.user_id,
+      type: "leftover_request",
+      title: "Someone wants your offer!",
+      body: `${requesterName} is interested in "${offer.title}"`,
+      data: { thread_id: thread.id, offer_id: offerId },
+      timestamp: toISODateString(),
+    });
+  }
 
   return successResponse({ thread_id: thread.id, already_exists: false });
 });
@@ -628,14 +659,16 @@ leftovers.post("/needs/:id/request", authMiddleware, requireNeighborhood, async 
       `${helperName} wants to help with "${(need as any).title || 'your request'}"`)
     .run();
 
-  await c.env.NOTIFICATION_QUEUE.send({
-    user_id: need.user_id,
-    type: "leftover_request",
-    title: "Someone wants to help!",
-    body: `${helperName} wants to help with your request`,
-    data: { thread_id: thread.id, need_id: needId },
-    timestamp: toISODateString(),
-  });
+  if (c.env.NOTIFICATION_QUEUE) {
+    await c.env.NOTIFICATION_QUEUE.send({
+      user_id: need.user_id,
+      type: "leftover_request",
+      title: "Someone wants to help!",
+      body: `${helperName} wants to help with your request`,
+      data: { thread_id: thread.id, need_id: needId },
+      timestamp: toISODateString(),
+    });
+  }
 
   return successResponse({ thread_id: thread.id, already_exists: false });
 });
@@ -827,14 +860,16 @@ leftovers.post("/matches/:id/request-close", authMiddleware, async (c) => {
 
   const otherUserId =
     match.offer_user_id === userId ? match.need_user_id : match.offer_user_id;
-  await c.env.NOTIFICATION_QUEUE.send({
-    user_id: otherUserId,
-    type: "match_closed",
-    title: "Match Completed",
-    body: "The leftover exchange has been completed successfully!",
-    data: { match_id: matchId, closure_type: "successful" },
-    timestamp: toISODateString(),
-  });
+  if (c.env.NOTIFICATION_QUEUE) {
+    await c.env.NOTIFICATION_QUEUE.send({
+      user_id: otherUserId,
+      type: "match_closed",
+      title: "Match Completed",
+      body: "The leftover exchange has been completed successfully!",
+      data: { match_id: matchId, closure_type: "successful" },
+      timestamp: toISODateString(),
+    });
+  }
 
   return successResponse({ status: "completed", coins_awarded: coinsAwarded });
 });
@@ -951,17 +986,19 @@ leftovers.post("/matches/:id/close", authMiddleware, async (c) => {
       match.offer_user_id === authContext.userId
         ? match.need_user_id
         : match.offer_user_id;
-    await c.env.NOTIFICATION_QUEUE.send({
-      user_id: otherUserId,
-      type: "match_closed",
-      title: "Match Completed",
-      body:
-        data.closure_type === "successful"
-          ? "The leftover exchange has been completed successfully!"
-          : "The match has been cancelled.",
-      data: { match_id: matchId, closure_type: data.closure_type },
-      timestamp: toISODateString(),
-    });
+    if (c.env.NOTIFICATION_QUEUE) {
+      await c.env.NOTIFICATION_QUEUE.send({
+        user_id: otherUserId,
+        type: "match_closed",
+        title: "Match Completed",
+        body:
+          data.closure_type === "successful"
+            ? "The leftover exchange has been completed successfully!"
+            : "The match has been cancelled.",
+        data: { match_id: matchId, closure_type: data.closure_type },
+        timestamp: toISODateString(),
+      });
+    }
 
     return successResponse({
       match: {
@@ -975,6 +1012,86 @@ leftovers.post("/matches/:id/close", authMiddleware, async (c) => {
   } catch (error) {
     console.error("Close match error:", error);
     return errorResponse("INTERNAL_ERROR", "Failed to close match", 500);
+  }
+});
+
+/**
+ * PATCH /v1/leftovers/offers/:id
+ * Edit own offer (title, description, image_urls, survey fields)
+ */
+const patchOfferSchema = z.object({
+  title: z.string().min(3).max(100).optional(),
+  description: z.string().max(1000).optional(),
+  image_url: z.string().max(2000).optional(),
+  image_urls: z.array(z.string().max(2000)).max(5).optional(),
+  survey: surveySchema.partial().optional(),
+  quantity: z.number().int().min(1).max(10).optional(),
+});
+
+leftovers.patch("/offers/:id", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+
+  const id = c.req.param("id");
+  const offer = await getLeftoverOfferById(c.env.DB, id);
+  if (!offer) {
+    return errorResponse("NOT_FOUND", "Offer not found", 404);
+  }
+  if (offer.user_id !== authContext.userId) {
+    return errorResponse("FORBIDDEN", "Not your offer", 403);
+  }
+
+  try {
+    const body = await c.req.json();
+    const validation = patchOfferSchema.safeParse(body);
+    if (!validation.success) {
+      return errorResponse("VALIDATION_ERROR", "Invalid request data", 400, validation.error.flatten());
+    }
+    const data = validation.data;
+
+    // Build image URL value
+    let imageUrlToStore: string | undefined;
+    if (data.image_urls && data.image_urls.length > 0) {
+      imageUrlToStore = JSON.stringify(data.image_urls);
+    } else if (data.image_url !== undefined) {
+      imageUrlToStore = data.image_url;
+    }
+
+    // Merge survey if provided
+    let surveyJson = (offer as any).survey_json;
+    if (data.survey) {
+      const existing = (() => { try { return JSON.parse(surveyJson); } catch { return {}; } })();
+      surveyJson = JSON.stringify({ ...existing, ...data.survey });
+    }
+
+    await c.env.DB.prepare(
+      `UPDATE leftover_offers SET
+        title = COALESCE(?, title),
+        description = COALESCE(?, description),
+        image_url = COALESCE(?, image_url),
+        survey_json = ?,
+        quantity = COALESCE(?, quantity),
+        updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(
+        data.title ?? null,
+        data.description !== undefined ? (data.description || null) : null,
+        imageUrlToStore ?? null,
+        surveyJson,
+        data.quantity ?? null,
+        id,
+      )
+      .run();
+
+    const updated = await getLeftoverOfferById(c.env.DB, id);
+    const user = await getUserById(c.env.DB, authContext.userId);
+    return successResponse(mapOffer(updated, user ? { id: user.id, display_name: user.display_name } : null));
+  } catch (error) {
+    console.error("Patch offer error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to update offer", 500);
   }
 });
 

@@ -123,8 +123,6 @@ admin.post("/campaigns", async (c) => {
 
   for (const n of neighborhoods) {
     const id = crypto.randomUUID();
-    // source_identifier is unique per row; url set to NULL so (source, url) UNIQUE
-    // constraint is never triggered (SQLite treats each NULL as distinct).
     const sourceIdentifier = `admin:${n.id}:${id}`;
     await db
       .prepare(
@@ -152,13 +150,35 @@ admin.post("/campaigns", async (c) => {
         contact_phone  ?? null,
         contact_email  ?? null,
         sourceIdentifier,
-        now,   // last_seen_at
+        now,
         parseInt(coin_reward) || 50,
         now,
         now,
       )
       .run();
     inserted++;
+
+    // Notify all users in this neighborhood about the new activity
+    const { results: usersInNeighborhood } = await db
+      .prepare("SELECT id FROM users WHERE neighborhood_id = ? AND deleted_at IS NULL")
+      .bind(n.id)
+      .all<{ id: string }>();
+
+    if (usersInNeighborhood.length > 0) {
+      const notifBody = location
+        ? `${organizer ?? 'Community'} at ${location}`
+        : (organizer ?? 'A new community activity has been added');
+      const notifData = JSON.stringify({ campaign_id: id });
+      const notifStatements = usersInNeighborhood.map(u =>
+        db.prepare(
+          `INSERT INTO notifications (id, user_id, type, title, body, data, created_at) VALUES (?, ?, 'new_activity', ?, ?, ?, ?)`
+        ).bind(crypto.randomUUID(), u.id, `New Activity: ${title}`, notifBody, notifData, now)
+      );
+      // Batch insert in chunks of 50
+      for (let i = 0; i < notifStatements.length; i += 50) {
+        await db.batch(notifStatements.slice(i, i + 50));
+      }
+    }
   }
 
   return c.json({ success: true, data: { inserted } }, 201);

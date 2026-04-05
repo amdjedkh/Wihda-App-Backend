@@ -6,13 +6,17 @@
  *
  * GET    /v1/admin/stats                        — platform statistics
  * GET    /v1/admin/users                        — full user list
- * GET    /v1/admin/neighborhoods                — active neighborhood list
+ * GET    /v1/admin/neighborhoods                — active neighborhood list (full + member_count)
+ * POST   /v1/admin/neighborhoods                — create neighborhood (bypasses overlap check)
+ * PUT    /v1/admin/neighborhoods/:id            — update neighborhood
+ * DELETE /v1/admin/neighborhoods/:id            — soft-delete neighborhood (is_active=0)
  * GET    /v1/admin/campaigns                    — full campaign list
  * POST   /v1/admin/campaigns                    — create activity (all or targeted neighborhoods)
  * PUT    /v1/admin/campaigns/:id                — update an activity
  * DELETE /v1/admin/campaigns/:id                — delete an activity
  * POST   /v1/admin/campaigns/ingest             — trigger scraper run (returns job_id)
  * GET    /v1/admin/campaigns/ingest/status      — poll scraper job status
+ * POST   /v1/admin/campaigns/generate           — AI-generate an activity from a text prompt
  */
 
 import { Hono } from "hono";
@@ -20,6 +24,10 @@ import type { Env } from "../types";
 import { errorResponse } from "../lib/utils";
 import { authMiddleware, requireAdmin } from "../middleware/auth";
 import { handleAdminScrapeWithJob } from "../queues/campaign";
+import { createNeighborhood } from "../lib/db";
+
+const GEMINI_MODEL    = "gemini-2.5-flash-lite";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 const admin = new Hono<{ Bindings: Env }>();
 
@@ -89,9 +97,101 @@ admin.get("/users", async (c) => {
 
 admin.get("/neighborhoods", async (c) => {
   const { results } = await c.env.DB
-    .prepare("SELECT id, name FROM neighborhoods WHERE is_active = 1 ORDER BY name ASC")
+    .prepare(
+      `SELECT n.*,
+              (SELECT COUNT(*) FROM user_neighborhoods un WHERE un.neighborhood_id = n.id AND un.left_at IS NULL) AS member_count
+       FROM neighborhoods n
+       WHERE n.is_active = 1
+       ORDER BY n.name ASC`,
+    )
     .all();
   return c.json({ success: true, data: results });
+});
+
+// ─── POST /v1/admin/neighborhoods ─────────────────────────────────────────────
+
+admin.post("/neighborhoods", async (c) => {
+  let body: any;
+  try { body = await c.req.json(); }
+  catch { return errorResponse("INVALID_BODY", "JSON body required", 400); }
+
+  const { name, description, color, center_lat, center_lng, radius_meters, city, country } = body;
+
+  if (!name || center_lat == null || center_lng == null || !radius_meters || !city) {
+    return errorResponse("MISSING_FIELDS", "name, center_lat, center_lng, radius_meters, city required", 400);
+  }
+
+  try {
+    const created = await createNeighborhood(c.env.DB, {
+      name, description, color, center_lat, center_lng, radius_meters, city, country,
+      created_by: (c as any).get("jwtPayload")?.sub ?? "admin",
+    });
+    return c.json({ success: true, data: { neighborhood: created } }, 201);
+  } catch (err: any) {
+    return errorResponse("DB_ERROR", err?.message || "Failed to create neighborhood", 500);
+  }
+});
+
+// ─── PUT /v1/admin/neighborhoods/:id ──────────────────────────────────────────
+
+admin.put("/neighborhoods/:id", async (c) => {
+  const { id } = c.req.param();
+  let body: any;
+  try { body = await c.req.json(); }
+  catch { return errorResponse("INVALID_BODY", "JSON body required", 400); }
+
+  const { name, description, color, center_lat, center_lng, radius_meters, city, country } = body;
+
+  if (!name || center_lat == null || center_lng == null || !radius_meters || !city) {
+    return errorResponse("MISSING_FIELDS", "name, center_lat, center_lng, radius_meters, city required", 400);
+  }
+
+  const now = new Date().toISOString();
+  const { meta } = await c.env.DB
+    .prepare(
+      `UPDATE neighborhoods SET
+         name           = ?,
+         description    = ?,
+         color          = ?,
+         center_lat     = ?,
+         center_lng     = ?,
+         radius_meters  = ?,
+         city           = ?,
+         country        = ?,
+         updated_at     = ?
+       WHERE id = ? AND is_active = 1`,
+    )
+    .bind(
+      name,
+      description    ?? null,
+      color          ?? "#14ae5c",
+      center_lat,
+      center_lng,
+      radius_meters,
+      city,
+      country        ?? "DZ",
+      now,
+      id,
+    )
+    .run();
+
+  if (meta.changes === 0) {
+    return errorResponse("NOT_FOUND", "Neighborhood not found", 404);
+  }
+
+  return c.json({ success: true });
+});
+
+// ─── DELETE /v1/admin/neighborhoods/:id ───────────────────────────────────────
+
+admin.delete("/neighborhoods/:id", async (c) => {
+  const { id } = c.req.param();
+  const now = new Date().toISOString();
+  await c.env.DB
+    .prepare("UPDATE neighborhoods SET is_active = 0, updated_at = ? WHERE id = ?")
+    .bind(now, id)
+    .run();
+  return c.json({ success: true });
 });
 
 // ─── GET /v1/admin/campaigns ──────────────────────────────────────────────────
@@ -111,6 +211,126 @@ admin.get("/campaigns", async (c) => {
 
   return c.json({ success: true, data: results });
 });
+
+// ─── POST /v1/admin/campaigns/generate ───────────────────────────────────────
+// Must be defined BEFORE /:id routes.
+
+admin.post("/campaigns/generate", async (c) => {
+  let body: any;
+  try { body = await c.req.json(); }
+  catch { return errorResponse("INVALID_BODY", "JSON body required", 400); }
+
+  const { prompt } = body;
+  if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+    return errorResponse("MISSING_FIELDS", "prompt is required", 400);
+  }
+
+  const today = new Date().toISOString().split("T")[0];
+
+  const geminiPrompt = `You are an activity planner for an Algerian civic community app called Wihda.
+The admin wants to create a community activity based on this description:
+"${prompt.trim()}"
+
+Today's date is ${today}. Generate exactly ONE activity as a JSON object (no markdown fences, no extra text) with these fields:
+{
+  "title": "string (required, concise)",
+  "subtitle": "string or null - short tagline",
+  "description": "string (2-4 sentences, engaging)",
+  "organizer": "string or null - who is organizing",
+  "organizer_logo": null,
+  "location": "string or null - city or venue in Algeria",
+  "start_dt": "ISO 8601 datetime (required, set to a reasonable future date based on the prompt)",
+  "end_dt": "ISO 8601 datetime or null",
+  "url": null,
+  "contact_phone": "string or null",
+  "contact_email": "string or null",
+  "coin_reward": integer between 50 and 500 based on activity effort level
+}
+
+Return ONLY the JSON object, no other text.`;
+
+  let event: any = null;
+  try {
+    const geminiRes = await fetch(
+      `${GEMINI_API_BASE}/${GEMINI_MODEL}:generateContent?key=${c.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: geminiPrompt }] }],
+          generationConfig: { temperature: 0.8, maxOutputTokens: 1024 },
+        }),
+      },
+    );
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      console.error("[admin/generate] Gemini error:", errText);
+      return errorResponse("AI_ERROR", "Gemini API error", 500);
+    }
+
+    const geminiData: any = await geminiRes.json();
+    const rawText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const cleaned = rawText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    event = JSON.parse(cleaned);
+  } catch (err: any) {
+    console.error("[admin/generate] Failed to parse Gemini response:", err);
+    return errorResponse("AI_PARSE_ERROR", "Failed to parse AI response", 500);
+  }
+
+  if (!event?.title || !event?.start_dt) {
+    return errorResponse("AI_PARSE_ERROR", "AI returned incomplete event data", 500);
+  }
+
+  // Generate AI images
+  const images: string[] = [];
+  const baseKey = `campaign-images/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  for (let i = 0; i < 3; i++) {
+    try {
+      const imgPrompt = buildGenerateImagePrompt(event, prompt, i);
+      const result = await (c.env.AI as any).run("@cf/black-forest-labs/flux-1-schnell", {
+        prompt: imgPrompt,
+        steps: 4,
+      }) as { image: string };
+
+      if (!result?.image) continue;
+
+      const binaryStr = atob(result.image);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let j = 0; j < binaryStr.length; j++) bytes[j] = binaryStr.charCodeAt(j);
+
+      const key = `${baseKey}-${i}.png`;
+      await c.env.STORAGE.put(key, bytes, { httpMetadata: { contentType: "image/png" } });
+      images.push(`${c.env.WORKERS_BASE_URL}/v1/uploads/${key}`);
+    } catch (err) {
+      console.error(`[admin/generate] Image ${i} failed:`, err);
+    }
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      ...event,
+      images,
+      image_url: images[0] ?? null,
+    },
+  });
+});
+
+function buildGenerateImagePrompt(event: any, _userPrompt: string, variant: number): string {
+  const title    = event.title    || "community activity";
+  const location = event.location || "Algeria";
+  const org      = event.organizer || "community volunteers";
+
+  const angles = [
+    `Wide shot of diverse Algerian community members participating in: ${title}, at ${location}`,
+    `Close-up of smiling volunteers working together on a civic activity: ${title}`,
+    `Documentary photo of people engaged in ${title} in an Algerian neighbourhood, organised by ${org}`,
+  ];
+
+  return `${angles[variant % 3]}. Natural daylight, photorealistic, warm colours, social impact, documentary style, high detail, 4k quality. No text or logos.`;
+}
 
 // ─── POST /v1/admin/campaigns/ingest ─────────────────────────────────────────
 // Must be defined BEFORE /:id routes to avoid matching "ingest" as an id.
@@ -202,7 +422,7 @@ admin.post("/campaigns", async (c) => {
             contact_phone, contact_email,
             source, source_identifier, status, last_seen_at,
             coin_reward, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'manual', ?, 'active', ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'manual', ?, 'active', ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -215,6 +435,7 @@ admin.post("/campaigns", async (c) => {
         location       ?? null,
         start_dt,
         end_dt         ?? null,
+        url            ?? null,
         primaryImageUrl,
         imagesJson,
         contact_phone  ?? null,

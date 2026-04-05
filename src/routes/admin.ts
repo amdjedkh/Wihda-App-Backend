@@ -4,18 +4,22 @@
  * All routes require a valid JWT with role = 'admin'.
  * Validated server-side via requireAdmin middleware.
  *
- * GET    /v1/admin/stats              — platform statistics
- * GET    /v1/admin/campaigns          — full campaign list
- * POST   /v1/admin/campaigns          — create activity in all active neighborhoods
- * DELETE /v1/admin/campaigns/:id      — delete an activity
- * POST   /v1/admin/campaigns/ingest   — trigger scraper run (fire-and-forget)
+ * GET    /v1/admin/stats                        — platform statistics
+ * GET    /v1/admin/users                        — full user list
+ * GET    /v1/admin/neighborhoods                — active neighborhood list
+ * GET    /v1/admin/campaigns                    — full campaign list
+ * POST   /v1/admin/campaigns                    — create activity (all or targeted neighborhoods)
+ * PUT    /v1/admin/campaigns/:id                — update an activity
+ * DELETE /v1/admin/campaigns/:id                — delete an activity
+ * POST   /v1/admin/campaigns/ingest             — trigger scraper run (returns job_id)
+ * GET    /v1/admin/campaigns/ingest/status      — poll scraper job status
  */
 
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { errorResponse } from "../lib/utils";
 import { authMiddleware, requireAdmin } from "../middleware/auth";
-import { handleScheduledCampaignIngestion } from "../queues/campaign";
+import { handleAdminScrapeWithJob } from "../queues/campaign";
 
 const admin = new Hono<{ Bindings: Env }>();
 
@@ -56,6 +60,38 @@ admin.get("/stats", async (c) => {
   });
 });
 
+// ─── GET /v1/admin/users ──────────────────────────────────────────────────────
+
+admin.get("/users", async (c) => {
+  const db = c.env.DB;
+
+  const { results } = await db
+    .prepare(
+      `SELECT u.id, u.email, u.full_name, u.role, u.neighborhood_id, n.name as neighborhood_name,
+              u.created_at, u.deleted_at,
+              COALESCE(SUM(CASE WHEN l.amount > 0 THEN l.amount ELSE 0 END), 0) as coins_earned
+       FROM users u
+       LEFT JOIN neighborhoods n ON n.id = u.neighborhood_id
+       LEFT JOIN coin_ledger_entries l ON l.user_id = u.id
+       WHERE u.deleted_at IS NULL
+       GROUP BY u.id
+       ORDER BY u.created_at DESC
+       LIMIT 500`,
+    )
+    .all();
+
+  return c.json({ success: true, data: results });
+});
+
+// ─── GET /v1/admin/neighborhoods ──────────────────────────────────────────────
+
+admin.get("/neighborhoods", async (c) => {
+  const { results } = await c.env.DB
+    .prepare("SELECT id, name FROM neighborhoods WHERE is_active = 1 ORDER BY name ASC")
+    .all();
+  return c.json({ success: true, data: results });
+});
+
 // ─── GET /v1/admin/campaigns ──────────────────────────────────────────────────
 
 admin.get("/campaigns", async (c) => {
@@ -78,10 +114,26 @@ admin.get("/campaigns", async (c) => {
 // Must be defined BEFORE /:id routes to avoid matching "ingest" as an id.
 
 admin.post("/campaigns/ingest", async (c) => {
-  handleScheduledCampaignIngestion(c.env).catch((err) =>
+  const jobId = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+    .map(b => b.toString(16).padStart(2, "0")).join("");
+
+  handleAdminScrapeWithJob(c.env, jobId).catch((err) =>
     console.error("[admin] ingest error:", err),
   );
-  return c.json({ success: true, message: "Scrape triggered" });
+
+  return c.json({ success: true, job_id: jobId });
+});
+
+// ─── GET /v1/admin/campaigns/ingest/status ────────────────────────────────────
+
+admin.get("/campaigns/ingest/status", async (c) => {
+  const id = c.req.query("id");
+  if (!id) return c.json({ success: false, error: "id required" }, 400);
+
+  const raw = await c.env.KV.get(`scrape:job:${id}`);
+  if (!raw) return c.json({ success: false, error: "Job not found or expired" }, 404);
+
+  return c.json({ success: true, data: JSON.parse(raw) });
 });
 
 // ─── POST /v1/admin/campaigns ─────────────────────────────────────────────────
@@ -98,6 +150,7 @@ admin.post("/campaigns", async (c) => {
     location, start_dt, end_dt, url,
     images, image_url,
     contact_phone, contact_email, coin_reward,
+    neighborhood_ids,
   } = body;
 
   if (!title || !start_dt) {
@@ -110,9 +163,21 @@ admin.post("/campaigns", async (c) => {
   const imagesJson = imagesArr.length > 0 ? JSON.stringify(imagesArr) : null;
   const primaryImageUrl = imagesArr[0] ?? null;
 
-  const { results: neighborhoods } = await db
-    .prepare("SELECT id FROM neighborhoods WHERE is_active = 1")
-    .all<{ id: string }>();
+  // Neighborhood targeting: use provided IDs or fall back to all active
+  let neighborhoods: { id: string }[];
+  if (Array.isArray(neighborhood_ids) && neighborhood_ids.length > 0) {
+    const placeholders = neighborhood_ids.map(() => "?").join(",");
+    const { results } = await db
+      .prepare(`SELECT id FROM neighborhoods WHERE id IN (${placeholders}) AND is_active = 1`)
+      .bind(...neighborhood_ids)
+      .all<{ id: string }>();
+    neighborhoods = results;
+  } else {
+    const { results } = await db
+      .prepare("SELECT id FROM neighborhoods WHERE is_active = 1")
+      .all<{ id: string }>();
+    neighborhoods = results;
+  }
 
   if (neighborhoods.length === 0) {
     return errorResponse("NO_NEIGHBORHOODS", "No active neighborhoods found", 400);

@@ -701,10 +701,9 @@ auth.post("/forgot-password", async (c) => {
       return errorResponse("VALIDATION_ERROR", "Valid email is required", 400);
     }
 
-    // Always respond with success to avoid user enumeration
     const user = await getUserByEmail(c.env.DB, email);
     if (!user) {
-      return successResponse({ message: "If that email exists, a reset code has been sent." });
+      return errorResponse("EMAIL_NOT_FOUND", "No account found with this email address", 404);
     }
 
     const otp = generateResetOtp();

@@ -114,15 +114,50 @@ export async function handleCampaignQueue(
   }
 }
 
+// ─── Scrape result types ──────────────────────────────────────────────────────
+
+export interface ScrapeSourceResult {
+  name: string;
+  url: string;
+  count: number;
+  error?: string;
+}
+
+export interface ScrapeJobResult {
+  status: "running" | "done" | "error";
+  started_at: string;
+  finished_at?: string;
+  sources: ScrapeSourceResult[];
+  total_events: number;
+  used_fallback: boolean;
+  upserted: number;
+  neighborhoods: number;
+  error?: string;
+}
+
 // ─── Scheduled handler ────────────────────────────────────────────────────────
 
 export async function handleScheduledCampaignIngestion(env: Env): Promise<void> {
   await handleCampaignScrape(env);
 }
 
+// ─── Admin-triggered scrape with job tracking ─────────────────────────────────
+
+export async function handleAdminScrapeWithJob(env: Env, jobId: string): Promise<void> {
+  const kvKey = `scrape:job:${jobId}`;
+  const startedAt = new Date().toISOString();
+  await env.KV.put(kvKey, JSON.stringify({ status: "running", started_at: startedAt, sources: [], total_events: 0, used_fallback: false, upserted: 0, neighborhoods: 0 }), { expirationTtl: 3600 });
+  try {
+    const result = await handleCampaignScrape(env);
+    await env.KV.put(kvKey, JSON.stringify({ ...result, status: "done", started_at: startedAt, finished_at: new Date().toISOString() }), { expirationTtl: 3600 });
+  } catch (err: any) {
+    await env.KV.put(kvKey, JSON.stringify({ status: "error", started_at: startedAt, finished_at: new Date().toISOString(), error: String(err?.message || err), sources: [], total_events: 0, used_fallback: false, upserted: 0, neighborhoods: 0 }), { expirationTtl: 3600 });
+  }
+}
+
 // ─── Core scrape + upsert ─────────────────────────────────────────────────────
 
-async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Promise<void> {
+async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Promise<Omit<ScrapeJobResult, "status" | "started_at" | "finished_at" | "error">> {
   console.log("[campaigns] Starting scrape run");
 
   const expired = await expireOldCampaigns(env.DB, 72);
@@ -141,25 +176,31 @@ async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Pro
 
   if (neighborhoods.length === 0) {
     console.log("[campaigns] No active neighborhoods");
-    return;
+    return { sources: [], total_events: 0, used_fallback: false, upserted: 0, neighborhoods: 0 };
   }
 
   // Scrape all sources
   let allEvents: ScrapedEvent[] = [];
+  const sourceResults: ScrapeSourceResult[] = [];
+
   for (const source of SOURCES) {
     console.log(`[campaigns] Scraping ${source.name}...`);
     try {
       const events = await scrapeSource(source.url, source.name, env);
       console.log(`[campaigns] Got ${events.length} events from ${source.name}`);
       allEvents = allEvents.concat(events);
-    } catch (err) {
+      sourceResults.push({ name: source.name, url: source.url, count: events.length });
+    } catch (err: any) {
       console.error(`[campaigns] Failed to scrape ${source.name}:`, err);
+      sourceResults.push({ name: source.name, url: source.url, count: 0, error: String(err?.message || err) });
     }
   }
 
+  let usedFallback = false;
   if (allEvents.length === 0) {
     console.log("[campaigns] No events found — using fallback");
     allEvents = buildFallbackEvents();
+    usedFallback = true;
   }
 
   // Deduplicate by title
@@ -203,6 +244,7 @@ async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Pro
   }
 
   console.log(`[campaigns] Upserted ${upserted} rows across ${neighborhoods.length} neighborhoods`);
+  return { sources: sourceResults, total_events: unique.length, used_fallback: usedFallback, upserted, neighborhoods: neighborhoods.length };
 }
 
 // ─── AI Image Generation ──────────────────────────────────────────────────────

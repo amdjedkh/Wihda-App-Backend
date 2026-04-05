@@ -67,11 +67,13 @@ admin.get("/users", async (c) => {
 
   const { results } = await db
     .prepare(
-      `SELECT u.id, u.email, u.full_name, u.role, u.neighborhood_id, n.name as neighborhood_name,
-              u.created_at, u.deleted_at,
-              COALESCE(SUM(CASE WHEN l.amount > 0 THEN l.amount ELSE 0 END), 0) as coins_earned
+      `SELECT u.id, u.email, u.display_name, u.role,
+              un.neighborhood_id, n.name as neighborhood_name,
+              u.created_at,
+              COALESCE(SUM(CASE WHEN l.amount > 0 AND l.status = 'valid' THEN l.amount ELSE 0 END), 0) as coins_earned
        FROM users u
-       LEFT JOIN neighborhoods n ON n.id = u.neighborhood_id
+       LEFT JOIN user_neighborhoods un ON un.user_id = u.id AND un.is_primary = 1 AND un.left_at IS NULL
+       LEFT JOIN neighborhoods n ON n.id = un.neighborhood_id
        LEFT JOIN coin_ledger_entries l ON l.user_id = u.id
        WHERE u.deleted_at IS NULL
        GROUP BY u.id
@@ -117,8 +119,11 @@ admin.post("/campaigns/ingest", async (c) => {
   const jobId = Array.from(crypto.getRandomValues(new Uint8Array(8)))
     .map(b => b.toString(16).padStart(2, "0")).join("");
 
-  handleAdminScrapeWithJob(c.env, jobId).catch((err) =>
-    console.error("[admin] ingest error:", err),
+  // waitUntil keeps the Worker alive after the response is returned
+  c.executionCtx.waitUntil(
+    handleAdminScrapeWithJob(c.env, jobId).catch((err) =>
+      console.error("[admin] ingest error:", err),
+    ),
   );
 
   return c.json({ success: true, job_id: jobId });

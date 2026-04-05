@@ -64,7 +64,7 @@ Respond ONLY with a valid JSON object — no markdown, no preamble, no extra tex
     "photos_authentic": boolean,
     "photos_different": boolean
   },
-  "rejection_reason": "string describing the specific problem, or null if approved"
+  "rejection_reason": "A specific, actionable 1-2 sentence explanation of exactly which check failed and why. Be precise — for example: 'The before and after photos appear to show different locations, the background structures do not match.' or 'No visible improvement between the two photos, the litter is still present in the after photo.' or 'The two photos appear identical with no detectable difference in cleanliness.' The user must understand what went wrong so they can fix it. Null if approved."
 }`;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

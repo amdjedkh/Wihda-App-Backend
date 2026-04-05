@@ -57,10 +57,11 @@ const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models
 
 // ─── Static fallback events ───────────────────────────────────────────────────
 
+const FALLBACK_LIMIT = 3;
+
 function buildFallbackEvents(): ScrapedEvent[] {
-  const now = new Date();
-  const nextWeek  = new Date(now.getTime() + 7  * 24 * 60 * 60 * 1000);
-  const nextMonth = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const now     = new Date();
+  const endDt   = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000); // 3 days from now
 
   return [
     {
@@ -69,8 +70,8 @@ function buildFallbackEvents(): ScrapedEvent[] {
       description: "Join your neighbours for a morning clean-up of shared public spaces. Gloves and bags provided. Everyone welcome!",
       organizer: "Wihda Community",
       location: "Local public park",
-      start_dt: nextWeek.toISOString(),
-      end_dt: new Date(nextWeek.getTime() + 3 * 60 * 60 * 1000).toISOString(),
+      start_dt: now.toISOString(),
+      end_dt: endDt.toISOString(),
       images: [],
       contact_email: "community@wihdaapp.com",
       coin_reward: 100,
@@ -81,10 +82,23 @@ function buildFallbackEvents(): ScrapedEvent[] {
       description: "Help us plant trees and shrubs in common areas to improve air quality and beautify our neighbourhood.",
       organizer: "Wihda Community",
       location: "Neighbourhood garden",
-      start_dt: nextMonth.toISOString(),
+      start_dt: now.toISOString(),
+      end_dt: endDt.toISOString(),
       images: [],
       contact_email: "community@wihdaapp.com",
       coin_reward: 150,
+    },
+    {
+      title: "Community Awareness Walk",
+      subtitle: "Walk together for a better neighbourhood",
+      description: "A friendly community walk to raise awareness about local civic issues. All ages welcome. Let's connect as neighbours!",
+      organizer: "Wihda Community",
+      location: "Main neighbourhood square",
+      start_dt: now.toISOString(),
+      end_dt: endDt.toISOString(),
+      images: [],
+      contact_email: "community@wihdaapp.com",
+      coin_reward: 75,
     },
   ];
 }
@@ -196,6 +210,12 @@ async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Pro
     }
   }
 
+  // Delete any campaigns whose end_dt has passed
+  const deleted = await env.DB
+    .prepare(`DELETE FROM campaigns WHERE end_dt IS NOT NULL AND end_dt < datetime('now')`)
+    .run();
+  console.log(`[campaigns] Deleted ${deleted.meta.changes} expired campaigns (end_dt passed)`);
+
   let usedFallback = false;
   if (allEvents.length === 0) {
     console.log("[campaigns] No events found — using fallback");
@@ -233,9 +253,22 @@ async function handleCampaignScrape(env: Env, scopeNeighborhoodId?: string): Pro
   // Upsert into every active neighborhood
   let upserted = 0;
   for (const neighborhood of neighborhoods) {
+    if (usedFallback) {
+      // Check how many fallback activities this neighborhood already has
+      const countRow = await env.DB
+        .prepare(`SELECT COUNT(*) as cnt FROM campaigns WHERE neighborhood_id = ? AND source = 'fallback' AND status = 'active'`)
+        .bind(neighborhood.id)
+        .first<{ cnt: number }>();
+      const existing = countRow?.cnt ?? 0;
+      if (existing >= FALLBACK_LIMIT) {
+        console.log(`[campaigns] Neighborhood ${neighborhood.name} already has ${existing} fallback activities, skipping`);
+        continue;
+      }
+    }
+
     for (const event of unique) {
       try {
-        await upsertCampaign(env.DB, neighborhood.id, event);
+        await upsertCampaign(env.DB, neighborhood.id, event, usedFallback ? "fallback" : "scrape");
         upserted++;
       } catch (err) {
         console.error(`[campaigns] Failed to upsert "${event.title}" for ${neighborhood.name}:`, err);
@@ -328,7 +361,7 @@ async function generateAIImages(event: ScrapedEvent, env: Env): Promise<string[]
 
 // ─── DB upsert ────────────────────────────────────────────────────────────────
 
-async function upsertCampaign(db: D1Database, neighborhoodId: string, event: ScrapedEvent): Promise<void> {
+async function upsertCampaign(db: D1Database, neighborhoodId: string, event: ScrapedEvent, source = "scrape"): Promise<void> {
   const id  = crypto.randomUUID();
   const now = new Date().toISOString();
 
@@ -343,7 +376,7 @@ async function upsertCampaign(db: D1Database, neighborhoodId: string, event: Scr
           location, start_dt, end_dt, url, image_url, images_json,
           contact_phone, contact_email,
           source, source_identifier, status, last_seen_at, coin_reward, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scrape', ?, 'active', ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
        ON CONFLICT(source, url) DO UPDATE SET
          title          = excluded.title,
          subtitle       = excluded.subtitle,
@@ -377,9 +410,10 @@ async function upsertCampaign(db: D1Database, neighborhoodId: string, event: Scr
       imagesJson,
       event.contact_phone  ?? null,
       event.contact_email  ?? null,
-      event.url ?? event.title,        // source_identifier
+      source,                           // source
+      event.url ?? event.title,         // source_identifier
       now,                              // last_seen_at
-      event.coin_reward ?? 50,         // coin_reward
+      event.coin_reward ?? 50,          // coin_reward
       now,
       now,
     )

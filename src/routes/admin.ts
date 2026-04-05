@@ -245,7 +245,7 @@ admin.post("/campaigns", async (c) => {
       const notifData = JSON.stringify({ campaign_id: id });
       const notifStatements = usersInNeighborhood.map(u =>
         db.prepare(
-          `INSERT INTO notifications (id, user_id, type, title, body, data, created_at) VALUES (?, ?, 'new_activity', ?, ?, ?, ?)`
+          `INSERT INTO notifications (id, user_id, type, title, body, data, created_at) VALUES (?, ?, 'campaign_new', ?, ?, ?, ?)`
         ).bind(crypto.randomUUID(), u.id, `New Activity: ${title}`, notifBody, notifData, now)
       );
       // Batch insert in chunks of 50

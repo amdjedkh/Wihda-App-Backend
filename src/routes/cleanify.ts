@@ -41,6 +41,7 @@ import {
   requireNeighborhood,
   requireModerator,
 } from "../middleware/auth";
+import { runCleanifyAICheck } from "../queues/cleanify";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -457,6 +458,8 @@ cleanify.post(
     if (!auth)
       return errorResponse("UNAUTHORIZED", "Authentication required", 401);
 
+    const userLanguage = c.req.header('X-Language') || 'en';
+
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({}));
     const validation = confirmPhotoSchema.safeParse(body);
@@ -512,19 +515,26 @@ cleanify.post(
          after_uploaded_at = ?,
          completed_at      = ?,
          status            = 'pending_review',
-         updated_at        = ?
+         updated_at        = ?,
+         language          = ?
      WHERE id = ?`,
     )
-      .bind(photoUrl, file_key, now, now, now, id)
+      .bind(photoUrl, file_key, now, now, now, userLanguage, id)
       .run();
 
-    await c.env.CLEANIFY_QUEUE.send({
-      type: "run_ai_check",
-      submission_id: id,
-      user_id: auth.userId,
-      neighborhood_id: submission.neighborhood_id,
-      timestamp: now,
-    });
+    if (c.env.CLEANIFY_QUEUE) {
+      await c.env.CLEANIFY_QUEUE.send({
+        type: "run_ai_check",
+        submission_id: id,
+        user_id: auth.userId,
+        neighborhood_id: submission.neighborhood_id,
+        timestamp: now,
+      });
+    } else {
+      c.executionCtx.waitUntil(
+        runCleanifyAICheck(c.env, id, auth.userId, submission.neighborhood_id, userLanguage),
+      );
+    }
 
     return c.json({
       success: true,
@@ -704,14 +714,16 @@ cleanify.post(
     });
 
     const now = toISODateString();
-    await c.env.NOTIFICATION_QUEUE.send({
-      user_id: submission.user_id,
-      type: "cleanify_approved",
-      title: "Submission Approved! 🎉",
-      body: `Your cleanify submission has been approved. You earned ${coinAmount} coins!`,
-      data: { submission_id: id, coins: coinAmount },
-      timestamp: now,
-    });
+    if (c.env.NOTIFICATION_QUEUE) {
+      await c.env.NOTIFICATION_QUEUE.send({
+        user_id: submission.user_id,
+        type: "cleanify_approved",
+        title: "Submission Approved! 🎉",
+        body: `Your cleanify submission has been approved. You earned ${coinAmount} coins!`,
+        data: { submission_id: id, coins: coinAmount },
+        timestamp: now,
+      });
+    }
 
     // Check & award badges after cleanify approval (non-blocking)
     checkAndAwardBadges(c.env.DB, submission.user_id);
@@ -787,14 +799,16 @@ cleanify.post(
     });
 
     const now = toISODateString();
-    await c.env.NOTIFICATION_QUEUE.send({
-      user_id: submission.user_id,
-      type: "cleanify_rejected",
-      title: "Submission Review",
-      body: note,
-      data: { submission_id: id, reason: note },
-      timestamp: now,
-    });
+    if (c.env.NOTIFICATION_QUEUE) {
+      await c.env.NOTIFICATION_QUEUE.send({
+        user_id: submission.user_id,
+        type: "cleanify_rejected",
+        title: "Submission Review",
+        body: note,
+        data: { submission_id: id, reason: note },
+        timestamp: now,
+      });
+    }
 
     return c.json({
       success: true,
@@ -890,7 +904,13 @@ cleanify.get("/active", authMiddleware, async (c) => {
   await expireStaleSubmissions(c.env.DB, auth.userId, auth.neighborhoodId);
 
   const active = await getActiveSubmission(c.env.DB, auth.userId, auth.neighborhoodId);
-  return c.json({ success: true, data: { submission: active ?? null } });
+  if (active) return c.json({ success: true, data: { submission: active } });
+
+  // Also check for pending_review submission
+  const pending = await c.env.DB.prepare(
+    `SELECT * FROM cleanify_submissions WHERE user_id = ? AND neighborhood_id = ? AND status = 'pending_review' ORDER BY created_at DESC LIMIT 1`
+  ).bind(auth.userId, auth.neighborhoodId).first();
+  return c.json({ success: true, data: { submission: pending ?? null } });
 });
 
 // ─── POST /v1/cleanify/:id/abandon ───────────────────────────────────────────

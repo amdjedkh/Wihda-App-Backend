@@ -13,7 +13,7 @@
  * for edge cases where AI confidence is insufficient or a user disputes.
  */
 
-import type { Env, CleanifyQueueMessage } from "../types";
+import type { Env, CleanifyQueueMessage, NotificationQueueMessage } from "../types";
 
 // ─── Gemini types ──────────────────────────────────────────────────────────────
 
@@ -113,6 +113,7 @@ async function runGeminiCleanifyCheck(
   apiKey: string,
   beforeImage: { data: string; mimeType: string },
   afterImage: { data: string; mimeType: string },
+  language?: string,
 ): Promise<CleanifyAIResult> {
   const contents: GeminiContent[] = [
     {
@@ -132,7 +133,7 @@ async function runGeminiCleanifyCheck(
             data: afterImage.data,
           },
         },
-        { text: "\n\nRespond with the JSON object only." },
+        { text: language === 'ar' ? "\n\nأجب بكائن JSON فقط. إذا كان هناك سبب رفض، اكتب rejection_reason باللغة العربية." : "\n\nRespond with the JSON object only." },
       ],
     },
   ];
@@ -211,6 +212,7 @@ interface SubmissionRow {
   before_photo_key: string | null;
   after_photo_key: string | null;
   status: string;
+  language?: string | null;
 }
 
 async function finalizeSubmission(
@@ -282,6 +284,86 @@ async function getCoinRewardAmount(db: D1Database): Promise<number> {
   return rule?.amount ?? 150;
 }
 
+// ─── Rate limiter (KV-based slot reservation, 7 s between requests) ───────────
+
+const SLOT_KEY = "cleanify_ai_next_slot";
+const SLOT_INTERVAL_MS = 7000;
+
+async function reserveAISlot(kv: KVNamespace): Promise<number> {
+  const now = Date.now();
+  const stored = await kv.get(SLOT_KEY);
+  const nextSlot = Math.max(now, stored ? parseInt(stored, 10) : now);
+  await kv.put(SLOT_KEY, String(nextSlot + SLOT_INTERVAL_MS), { expirationTtl: 3600 });
+  return nextSlot;
+}
+
+// ─── Direct AI check (no queue) ───────────────────────────────────────────────
+
+export async function runCleanifyAICheck(
+  env: Env,
+  submissionId: string,
+  userId: string,
+  neighborhoodId: string,
+  language?: string,
+): Promise<void> {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT id, user_id, neighborhood_id, before_photo_key, after_photo_key, status, language
+       FROM cleanify_submissions WHERE id = ? AND user_id = ?`,
+    )
+      .bind(submissionId, userId)
+      .first<SubmissionRow>();
+
+    if (!row || row.status !== "pending_review") return;
+    if (!row.before_photo_key || !row.after_photo_key) {
+      await finalizeSubmission(env.DB, submissionId, {
+        approved: false, confidence: 0, raw: {},
+        rejection_reason: "One or more required photos are missing from storage.",
+      }, 0);
+      return;
+    }
+
+    const [beforeImage, afterImage] = await Promise.all([
+      fetchR2AsBase64(env.STORAGE, row.before_photo_key),
+      fetchR2AsBase64(env.STORAGE, row.after_photo_key),
+    ]);
+
+    if (!beforeImage || !afterImage) {
+      await finalizeSubmission(env.DB, submissionId, {
+        approved: false, confidence: 0, raw: {},
+        rejection_reason: "Could not retrieve one or more photos from storage.",
+      }, 0);
+      return;
+    }
+
+    // Rate limit: wait for our reserved slot before calling Gemini
+    const slot = await reserveAISlot(env.KV);
+    const delay = slot - Date.now();
+    if (delay > 0) await new Promise(r => setTimeout(r, delay));
+
+    const result = await runGeminiCleanifyCheck(env.GEMINI_API_KEY, beforeImage, afterImage, row.language ?? undefined);
+    const coinAmount = await getCoinRewardAmount(env.DB);
+
+    if (result.approved) {
+      await awardCoins(env.DB, submissionId, userId, neighborhoodId, coinAmount);
+    }
+
+    await finalizeSubmission(env.DB, submissionId, result, coinAmount);
+
+    // Store notification directly (no queue)
+    const notification: NotificationQueueMessage = result.approved
+      ? { user_id: userId, type: "cleanify_approved", title: "Submission Approved! 🎉", body: `Your cleanify submission was verified. You earned ${coinAmount} coins!`, data: { submission_id: submissionId, coins: coinAmount }, timestamp: new Date().toISOString() }
+      : { user_id: userId, type: "cleanify_rejected", title: "Submission Not Approved", body: result.rejection_reason ?? "Your submission could not be verified. Please try again with clearer photos.", data: { submission_id: submissionId }, timestamp: new Date().toISOString() };
+
+    await env.DB.prepare(
+      `INSERT INTO notifications (id, user_id, type, title, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), userId, notification.type, notification.title, notification.body, notification.data ? JSON.stringify(notification.data) : null, new Date().toISOString()).run();
+
+  } catch (err) {
+    console.error(`[cleanify] Direct AI check failed for ${submissionId}:`, String(err));
+  }
+}
+
 // ─── Main consumer ────────────────────────────────────────────────────────────
 
 export async function handleCleanifyQueue(
@@ -300,7 +382,7 @@ export async function handleCleanifyQueue(
     try {
       // ── 1. Fetch submission ──────────────────────────────────────────────────
       const row = await env.DB.prepare(
-        `SELECT id, user_id, neighborhood_id, before_photo_key, after_photo_key, status
+        `SELECT id, user_id, neighborhood_id, before_photo_key, after_photo_key, status, language
          FROM cleanify_submissions WHERE id = ? AND user_id = ?`,
       )
         .bind(submission_id, user_id)
@@ -378,6 +460,7 @@ export async function handleCleanifyQueue(
         env.GEMINI_API_KEY,
         beforeImage,
         afterImage,
+        row.language ?? undefined,
       );
       console.log(`[cleanify] AI result for ${submission_id}: approved=${result.approved} confidence=${result.confidence}`);
 

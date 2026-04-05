@@ -20,10 +20,10 @@ database_id = "b5e14395-6fa1-4733-b28c-cb64c4aeb540"
 binding = "KV"
 id = "0b220ac5131b4db589b0bff10e02dd23"
 
-# R2 Storage — enable R2 in Cloudflare dashboard first, then uncomment
-# [[r2_buckets]]
-# binding = "STORAGE"
-# bucket_name = "wihda-uploads"
+# R2 Storage
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "wihda-uploads"
 
 # Durable Objects for Chat
 [[durable_objects.bindings]]

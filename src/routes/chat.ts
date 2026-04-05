@@ -257,7 +257,7 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
     ).bind(authContext.userId, threadId).run();
 
     // Notify receiver
-    if (receiverId) {
+    if (receiverId && c.env.NOTIFICATION_QUEUE) {
       const isGiveThread = !!threadAny.offer_id;
       await c.env.NOTIFICATION_QUEUE.send({
         user_id: receiverId,
@@ -336,7 +336,7 @@ chat.post("/:thread_id/confirm", authMiddleware, async (c) => {
     if (receiverId) checkAndAwardBadges(c.env.DB, receiverId);
 
     // Notify giver
-    if (giverId) {
+    if (giverId && c.env.NOTIFICATION_QUEUE) {
       await c.env.NOTIFICATION_QUEUE.send({
         user_id: giverId,
         type: "coins_awarded",
@@ -533,15 +533,17 @@ chat.post(
         }),
       );
 
-      // Push push notification to the other participant
-      await c.env.NOTIFICATION_QUEUE.send({
-        user_id: otherUserId,
-        type: "new_message",
-        title: "New Message",
-        body: data.body.substring(0, 100),
-        data: { thread_id: threadId, message_id: message.id },
-        timestamp: toISODateString(),
-      });
+      // Push notification to the other participant
+      if (c.env.NOTIFICATION_QUEUE) {
+        await c.env.NOTIFICATION_QUEUE.send({
+          user_id: otherUserId,
+          type: "new_message",
+          title: "New Message",
+          body: data.body.substring(0, 100),
+          data: { thread_id: threadId, message_id: message.id },
+          timestamp: toISODateString(),
+        });
+      }
 
       return successResponse({
         message: {

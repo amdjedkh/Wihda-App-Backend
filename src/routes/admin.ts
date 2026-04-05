@@ -230,7 +230,11 @@ admin.post("/campaigns", async (c) => {
 
     // Notify all users in this neighborhood about the new activity
     const { results: usersInNeighborhood } = await db
-      .prepare("SELECT id FROM users WHERE neighborhood_id = ? AND deleted_at IS NULL")
+      .prepare(
+        `SELECT u.id FROM users u
+         JOIN user_neighborhoods un ON un.user_id = u.id AND un.neighborhood_id = ? AND un.left_at IS NULL
+         WHERE u.deleted_at IS NULL`,
+      )
       .bind(n.id)
       .all<{ id: string }>();
 

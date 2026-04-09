@@ -22,7 +22,7 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
 import { errorResponse } from "../lib/utils";
-import { authMiddleware, requireAdmin } from "../middleware/auth";
+import { authMiddleware, requireAdmin, getAuthContext } from "../middleware/auth";
 import { handleAdminScrapeWithJob } from "../queues/campaign";
 import { createNeighborhood } from "../lib/db";
 
@@ -124,7 +124,7 @@ admin.post("/neighborhoods", async (c) => {
   try {
     const created = await createNeighborhood(c.env.DB, {
       name, description, color, center_lat, center_lng, radius_meters, city, country,
-      created_by: (c as any).get("jwtPayload")?.sub ?? "admin",
+      created_by: getAuthContext(c)!.userId,
     });
     return c.json({ success: true, data: { neighborhood: created } }, 201);
   } catch (err: any) {

@@ -561,4 +561,109 @@ admin.delete("/campaigns/:id", async (c) => {
   return c.json({ success: true });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// VERIFICATION ADMIN ROUTES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /v1/admin/verifications
+ * List PENDING verification sessions — oldest first (FIFO)
+ */
+admin.get("/verifications", async (c) => {
+  const rows = await c.env.DB.prepare(`
+    SELECT vs.id, vs.user_id, vs.status, vs.attempt_count,
+           vs.front_doc_key, vs.back_doc_key, vs.selfie_key,
+           vs.created_at, vs.last_attempt_at,
+           u.display_name, u.email
+    FROM verification_sessions vs
+    JOIN users u ON u.id = vs.user_id
+    WHERE vs.status = 'pending'
+    ORDER BY vs.created_at ASC
+  `).all<any>();
+  return c.json({ success: true, data: rows.results });
+});
+
+/**
+ * GET /v1/admin/verifications/history
+ * List VERIFIED sessions — newest first
+ */
+admin.get("/verifications/history", async (c) => {
+  const rows = await c.env.DB.prepare(`
+    SELECT vs.id, vs.user_id, vs.status,
+           vs.manual_note, vs.manual_reviewed_at,
+           vs.created_at,
+           u.display_name, u.email
+    FROM verification_sessions vs
+    JOIN users u ON u.id = vs.user_id
+    WHERE vs.status = 'verified'
+    ORDER BY vs.manual_reviewed_at DESC
+  `).all<any>();
+  return c.json({ success: true, data: rows.results });
+});
+
+/**
+ * GET /v1/admin/verifications/:session_id
+ * Get a single pending session with user info
+ */
+admin.get("/verifications/:session_id", async (c) => {
+  const { session_id } = c.req.param();
+  const row = await c.env.DB.prepare(`
+    SELECT vs.id, vs.user_id, vs.status, vs.attempt_count,
+           vs.front_doc_key, vs.back_doc_key, vs.selfie_key,
+           vs.ai_rejection_reason, vs.manual_note, vs.created_at,
+           u.display_name, u.email
+    FROM verification_sessions vs
+    JOIN users u ON u.id = vs.user_id
+    WHERE vs.id = ?
+  `).bind(session_id).first<any>();
+  if (!row) return c.json({ success: false, error: { code: "NOT_FOUND", message: "Session not found" } }, 404);
+  return c.json({ success: true, data: row });
+});
+
+/**
+ * GET /v1/admin/verifications/:session_id/document/:type
+ * Proxy an R2 verification document (front | back | selfie) to the admin browser.
+ * Accepts auth either via Authorization header OR ?token= query param (for <img> tags).
+ */
+admin.get("/verifications/:session_id/document/:type", async (c) => {
+  // Allow token via query param for direct <img> src usage
+  const tokenParam = c.req.query("token");
+  if (tokenParam && !c.req.header("Authorization")) {
+    c.req.raw.headers.set("Authorization", `Bearer ${tokenParam}`);
+  }
+
+  const { session_id, type } = c.req.param();
+  if (!["front", "back", "selfie"].includes(type)) {
+    return c.json({ success: false, error: { code: "INVALID_TYPE" } }, 400);
+  }
+
+  const { verifyJWT } = await import("../lib/utils");
+  const token = tokenParam ?? (c.req.header("Authorization") ?? "").replace("Bearer ", "");
+  if (!token) return c.json({ success: false, error: { code: "UNAUTHORIZED" } }, 401);
+  const payload = await verifyJWT(token, c.env.JWT_SECRET);
+  if (!payload || payload.role !== "admin") {
+    return c.json({ success: false, error: { code: "FORBIDDEN" } }, 403);
+  }
+
+  const session = await c.env.DB.prepare(
+    "SELECT front_doc_key, back_doc_key, selfie_key FROM verification_sessions WHERE id = ?"
+  ).bind(session_id).first<any>();
+  if (!session) return c.json({ success: false, error: { code: "NOT_FOUND" } }, 404);
+
+  const key: string | null =
+    type === "front" ? session.front_doc_key :
+    type === "back"  ? session.back_doc_key  :
+                       session.selfie_key;
+
+  if (!key) return c.json({ success: false, error: { code: "DOCUMENT_NOT_UPLOADED" } }, 404);
+
+  const obj = await c.env.STORAGE.get(key);
+  if (!obj) return c.json({ success: false, error: { code: "NOT_FOUND" } }, 404);
+
+  const headers = new Headers();
+  headers.set("Content-Type", obj.httpMetadata?.contentType ?? "image/jpeg");
+  headers.set("Cache-Control", "private, max-age=300");
+  return new Response(obj.body, { headers });
+});
+
 export default admin;

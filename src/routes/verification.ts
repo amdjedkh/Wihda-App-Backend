@@ -67,6 +67,9 @@ const manualReviewSchema = z.object({
   session_id: z.string().uuid(),
   approved: z.boolean(),
   note: z.string().max(1000).optional(),
+}).refine((d) => d.approved || (d.note && d.note.trim().length > 0), {
+  message: "A rejection reason is required when rejecting",
+  path: ["note"],
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -327,16 +330,9 @@ verification.post("/submit", authMiddleware, async (c) => {
 
     await updateUserVerificationStatus(c.env.DB, auth.userId, "pending");
 
-    await c.env.VERIFICATION_QUEUE.send({
-      type: "run_ai_check",
-      session_id,
-      user_id: auth.userId,
-      timestamp: new Date().toISOString(),
-    });
-
     return successResponse({
       status: "pending",
-      message: "Verification submitted. Review typically takes 1–2 minutes.",
+      message: "Verification submitted. Our team will review your documents shortly.",
     });
   } catch (error) {
     console.error("Verification submit error:", error);
@@ -372,7 +368,9 @@ verification.get("/status", authMiddleware, async (c) => {
             status: session.status,
             expires_at: session.expires_at,
             rejection_reason:
-              session.status === "failed" ? session.ai_rejection_reason : null,
+              session.status === "failed"
+                ? ((session as any).manual_note || session.ai_rejection_reason || null)
+                : null,
             created_at: session.created_at,
           }
         : null,

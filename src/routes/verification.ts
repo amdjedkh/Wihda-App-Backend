@@ -264,6 +264,72 @@ verification.post("/presigned-url", authMiddleware, async (c) => {
   }
 });
 
+// ─── POST /v1/verification/upload ─────────────────────────────────────────────
+
+/**
+ * Direct multipart upload for verification documents.
+ * Accepts a single file as multipart/form-data with fields:
+ *   session_id      — verification session UUID
+ *   document_type   — "front" | "back" | "selfie"
+ *   file            — the image file
+ */
+verification.post("/upload", authMiddleware, async (c) => {
+  const auth = getAuthContext(c)!;
+
+  try {
+    const formData = await c.req.formData();
+    const sessionId = formData.get("session_id") as string | null;
+    const documentType = formData.get("document_type") as string | null;
+    const file = formData.get("file") as File | null;
+
+    if (!sessionId || !documentType || !file) {
+      return errorResponse("VALIDATION_ERROR", "session_id, document_type, and file are required", 400);
+    }
+
+    if (!["front", "back", "selfie"].includes(documentType)) {
+      return errorResponse("VALIDATION_ERROR", "document_type must be front, back, or selfie", 400);
+    }
+
+    if (file.size > MAX_BYTES) {
+      return errorResponse("FILE_TOO_LARGE", "File must be less than 10MB", 400);
+    }
+
+    const session = await getVerificationSessionById(c.env.DB, sessionId);
+    if (!session) return errorResponse("SESSION_NOT_FOUND", "Session not found", 404);
+    if (session.user_id !== auth.userId) return errorResponse("FORBIDDEN", "Access denied", 403);
+    if (session.status !== "created") {
+      return errorResponse("SESSION_NOT_OPEN", `Session is in '${session.status}' state`, 409);
+    }
+    if (new Date(session.expires_at) < new Date()) {
+      await updateVerificationSession(c.env.DB, sessionId, { status: "expired" });
+      return errorResponse("SESSION_EXPIRED", "Session expired. Please start a new one.", 410);
+    }
+
+    const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+    const safeExt = Object.keys(ALLOWED_EXTENSIONS).includes(ext) ? ext : "jpg";
+    const fileKey = `verification/${auth.userId}/${sessionId}/${documentType}.${safeExt}`;
+    const mimeType = file.type || ALLOWED_EXTENSIONS[safeExt] || "image/jpeg";
+
+    const buffer = await file.arrayBuffer();
+    await c.env.STORAGE.put(fileKey, buffer, {
+      httpMetadata: { contentType: mimeType },
+      customMetadata: { userId: auth.userId, documentType },
+    });
+
+    const keyField =
+      documentType === "front" ? { front_doc_key: fileKey } :
+      documentType === "back"  ? { back_doc_key:  fileKey } :
+                                  { selfie_key:    fileKey };
+
+    await updateVerificationSession(c.env.DB, sessionId, keyField);
+
+    return successResponse({ document_type: documentType, file_key: fileKey });
+  } catch (error) {
+    console.error("Verification upload error:", error);
+    return errorResponse("INTERNAL_ERROR", "Failed to upload document", 500);
+  }
+});
+
 // ─── POST /v1/verification/submit ─────────────────────────────────────────────
 
 verification.post("/submit", authMiddleware, async (c) => {

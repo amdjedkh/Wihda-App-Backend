@@ -37,8 +37,30 @@ const sendMessageSchema = z.object({
 });
 
 /**
+ * GET /v1/chats/unread
+ * Total unread message count across all threads (used for header badge)
+ */
+chat.get("/unread", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) {
+    return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+  }
+  const result = await c.env.DB.prepare(
+    `SELECT COUNT(*) as count FROM chat_messages cm
+     JOIN chat_threads ct ON cm.thread_id = ct.id
+     WHERE (ct.participant_1_id = ? OR ct.participant_2_id = ?)
+       AND cm.sender_id != ?
+       AND cm.read_at IS NULL
+       AND cm.deleted_at IS NULL`,
+  )
+    .bind(authContext.userId, authContext.userId, authContext.userId)
+    .first<{ count: number }>();
+  return successResponse({ unread_count: result?.count ?? 0 });
+});
+
+/**
  * GET /v1/chats
- * List user's chat threads
+ * List user's chat threads with post title, post type, and unread count
  */
 chat.get("/", authMiddleware, async (c) => {
   const authContext = getAuthContext(c);
@@ -67,29 +89,70 @@ chat.get("/", authMiddleware, async (c) => {
   ).results;
   const userMap = Object.fromEntries(userRows.map((u) => [u.id, u]));
 
+  // Last message per thread
   const lastMessages = await Promise.all(
     threads.map((t) =>
       c.env.DB.prepare(
-        `
-        SELECT id, body, created_at FROM chat_messages
-        WHERE thread_id = ? AND deleted_at IS NULL
-        ORDER BY created_at DESC LIMIT 1
-      `,
+        `SELECT id, body, created_at FROM chat_messages
+         WHERE thread_id = ? AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
       )
         .bind(t.id)
         .first<{ id: string; body: string; created_at: string }>(),
     ),
   );
 
-  const enrichedThreads = threads.map((thread, i) => {
+  // Unread count per thread
+  const unreadCounts = await Promise.all(
+    threads.map((t) =>
+      c.env.DB.prepare(
+        `SELECT COUNT(*) as count FROM chat_messages
+         WHERE thread_id = ? AND sender_id != ? AND read_at IS NULL AND deleted_at IS NULL`,
+      )
+        .bind(t.id, authContext.userId)
+        .first<{ count: number }>(),
+    ),
+  );
+
+  // Batch-fetch offer titles for threads that have an offer_id
+  const threadsAny = threads as any[];
+  const offerIds = [...new Set(threadsAny.map((t) => t.offer_id).filter(Boolean))];
+  const offerMap: Record<string, string> = {};
+  if (offerIds.length > 0) {
+    const offerRows = (
+      await c.env.DB.prepare(
+        `SELECT id, title FROM leftover_offers WHERE id IN (${offerIds.map(() => "?").join(",")})`,
+      )
+        .bind(...offerIds)
+        .all<{ id: string; title: string }>()
+    ).results;
+    for (const o of offerRows) offerMap[o.id] = o.title;
+  }
+
+  const enrichedThreads = threadsAny.map((thread, i) => {
     const otherUserId =
       thread.participant_1_id === authContext.userId
         ? thread.participant_2_id
         : thread.participant_1_id;
     const lastMessage = lastMessages[i];
+
+    let postTitle: string | null = null;
+    let postType: "give" | "get" | null = null;
+    if (thread.offer_id) {
+      postTitle = offerMap[thread.offer_id] || "Item Offer";
+      postType = "give";
+    } else if (thread.need_id) {
+      postTitle = "Food Request";
+      postType = "get";
+    }
+
     return {
       id: thread.id,
       match_id: thread.match_id,
+      offer_id: thread.offer_id ?? null,
+      need_id: thread.need_id ?? null,
+      post_title: postTitle,
+      post_type: postType,
       other_user: userMap[otherUserId] ?? null,
       last_message: lastMessage
         ? {
@@ -97,6 +160,7 @@ chat.get("/", authMiddleware, async (c) => {
             created_at: lastMessage.created_at,
           }
         : null,
+      unread_count: unreadCounts[i]?.count ?? 0,
       status: thread.status,
       created_at: thread.created_at,
     };

@@ -44,15 +44,22 @@ export async function authMiddleware(
 ) {
   const authHeader = c.req.header("Authorization");
 
-  if (!authHeader?.startsWith("Bearer ")) {
+  // Accept token from Authorization header OR ?token= query param
+  // (the latter is used by direct-URL endpoints like <img src="...?token=...">)
+  let token: string | null = null;
+  if (authHeader?.startsWith("Bearer ")) {
+    token = authHeader.substring(7);
+  } else {
+    token = c.req.query("token") ?? null;
+  }
+
+  if (!token) {
     return unauthorizedResponse(
       c,
       "MISSING_TOKEN",
       "Authorization header with Bearer token is required",
     );
   }
-
-  const token = authHeader.substring(7);
   const payload = await verifyJWT(token, c.env.JWT_SECRET);
 
   if (!payload) {

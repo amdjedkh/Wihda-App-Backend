@@ -578,25 +578,27 @@ verification.post("/admin/review", authMiddleware, requireAdmin, async (c) => {
       session.user_id,
       approved ? "verified" : "failed",
     );
-    await c.env.NOTIFICATION_QUEUE.send(
-      approved
-        ? {
-            user_id: session.user_id,
-            type: "verification_approved",
-            title: "Identity Verified ✓",
-            body: "Your identity has been verified. You now have full access to Wihda.",
-            timestamp: new Date().toISOString(),
-          }
-        : {
-            user_id: session.user_id,
-            type: "verification_rejected",
-            title: "Verification Failed",
-            body:
-              note ??
-              "Your verification was not approved. Please contact support for details.",
-            timestamp: new Date().toISOString(),
-          },
-    );
+    if (c.env.NOTIFICATION_QUEUE) {
+      await c.env.NOTIFICATION_QUEUE.send(
+        approved
+          ? {
+              user_id: session.user_id,
+              type: "verification_approved",
+              title: "Identity Verified ✓",
+              body: "Your identity has been verified. You now have full access to Wihda.",
+              timestamp: new Date().toISOString(),
+            }
+          : {
+              user_id: session.user_id,
+              type: "verification_rejected",
+              title: "Verification Failed",
+              body:
+                note ??
+                "Your verification was not approved. Please contact support for details.",
+              timestamp: new Date().toISOString(),
+            },
+      );
+    }
 
     return successResponse({ finalized: true, status: newStatus });
   } catch (error) {

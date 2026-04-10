@@ -596,13 +596,11 @@ auth.get("/google/callback", async (c) => {
 
     // ── Redirect based on flow ────────────────────────────────────────────────
     if (isNative) {
-      // Store tokens in KV — native app polls GET /v1/auth/google/session
-      await c.env.KV.put(
-        `oauth_session:${session_id}`,
-        JSON.stringify({ access_token: accessToken, refresh_token: refreshToken }),
-        { expirationTtl: 300 },
-      );
-      return c.redirect(`${frontendUrl}/auth/google/callback?native=1&success=1`);
+      // Redirect to the app's custom URL scheme.
+      // iOS intercepts this from SFSafariViewController, opens the app via appUrlOpen,
+      // and the app calls Browser.close() to dismiss the blank browser window.
+      const nativeParams = new URLSearchParams({ access_token: accessToken, refresh_token: refreshToken });
+      return c.redirect(`com.wihda.app://auth/callback?${nativeParams.toString()}`);
     }
 
     // Web: send tokens in URL, frontend stores them

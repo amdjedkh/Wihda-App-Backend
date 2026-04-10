@@ -92,21 +92,101 @@ auth.post("/signup", async (c) => {
 
     if (data.email) {
       const existing = await getUserByEmail(c.env.DB, data.email);
-      if (existing)
-        return errorResponse(
-          "EMAIL_EXISTS",
-          "An account with this email already exists",
-          409,
+      if (existing) {
+        if (!(existing as any).deleted_at) {
+          return errorResponse(
+            "EMAIL_EXISTS",
+            "An account with this email already exists",
+            409,
+          );
+        }
+        // Soft-deleted account — reactivate with new credentials
+        const passwordHash = await hashPassword(data.password);
+        await c.env.DB.prepare(
+          `UPDATE users SET
+             deleted_at = NULL,
+             password_hash = ?,
+             display_name = ?,
+             google_id = NULL,
+             photo_url = NULL,
+             email_verified = 0,
+             phone_verified = 0,
+             verification_status = 'unverified',
+             status = 'active',
+             language_preference = COALESCE(?, language_preference),
+             updated_at = datetime('now')
+           WHERE id = ?`,
+        )
+          .bind(passwordHash, data.display_name, data.language_preference ?? null, existing.id)
+          .run();
+
+        const user = await getUserById(c.env.DB, existing.id);
+        if (!user) return errorResponse("INTERNAL_ERROR", "Failed to reactivate account", 500);
+
+        const session = await createVerificationSession(c.env.DB, user.id);
+        const restrictedToken = await createJWT(
+          { sub: user.id, role: user.role, neighborhood_id: null, verification_status: "unverified", scope: "verification_only" },
+          c.env.JWT_SECRET,
+          24,
         );
+        return successResponse({
+          verification_session_id: session.id,
+          restricted_token: restrictedToken,
+          expires_in: 86400,
+          user: { id: user.id, display_name: user.display_name },
+          contact_verification_required: true,
+          contact_channel: "email" as const,
+        } as SignupResponse, 201);
+      }
     }
     if (data.phone) {
       const existing = await getUserByPhone(c.env.DB, data.phone);
-      if (existing)
-        return errorResponse(
-          "PHONE_EXISTS",
-          "An account with this phone already exists",
-          409,
+      if (existing) {
+        if (!(existing as any).deleted_at) {
+          return errorResponse(
+            "PHONE_EXISTS",
+            "An account with this phone already exists",
+            409,
+          );
+        }
+        // Soft-deleted account — reactivate with new credentials
+        const passwordHash = await hashPassword(data.password);
+        await c.env.DB.prepare(
+          `UPDATE users SET
+             deleted_at = NULL,
+             password_hash = ?,
+             display_name = ?,
+             google_id = NULL,
+             photo_url = NULL,
+             email_verified = 0,
+             phone_verified = 0,
+             verification_status = 'unverified',
+             status = 'active',
+             language_preference = COALESCE(?, language_preference),
+             updated_at = datetime('now')
+           WHERE id = ?`,
+        )
+          .bind(passwordHash, data.display_name, data.language_preference ?? null, existing.id)
+          .run();
+
+        const user = await getUserById(c.env.DB, existing.id);
+        if (!user) return errorResponse("INTERNAL_ERROR", "Failed to reactivate account", 500);
+
+        const session = await createVerificationSession(c.env.DB, user.id);
+        const restrictedToken = await createJWT(
+          { sub: user.id, role: user.role, neighborhood_id: null, verification_status: "unverified", scope: "verification_only" },
+          c.env.JWT_SECRET,
+          24,
         );
+        return successResponse({
+          verification_session_id: session.id,
+          restricted_token: restrictedToken,
+          expires_in: 86400,
+          user: { id: user.id, display_name: user.display_name },
+          contact_verification_required: true,
+          contact_channel: "phone" as const,
+        } as SignupResponse, 201);
+      }
     }
 
     const passwordHash = await hashPassword(data.password);
@@ -700,7 +780,7 @@ auth.post("/forgot-password", async (c) => {
     }
 
     const user = await getUserByEmail(c.env.DB, email);
-    if (!user) {
+    if (!user || (user as any).deleted_at) {
       return errorResponse("EMAIL_NOT_FOUND", "No account found with this email address", 404);
     }
 

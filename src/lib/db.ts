@@ -1337,7 +1337,7 @@ export async function createUserWithGoogle(
     .prepare(
       `
     INSERT INTO users (id, email, password_hash, display_name, language_preference, google_id, photo_url, verification_status, email_verified, created_at, updated_at)
-    VALUES (?, ?, '', ?, ?, ?, ?, 'verified', 1, ?, ?)
+    VALUES (?, ?, '', ?, ?, ?, ?, 'unverified', 1, ?, ?)
   `,
     )
     .bind(

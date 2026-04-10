@@ -626,7 +626,7 @@ auth.get("/google/callback", async (c) => {
           await c.env.DB.prepare(
             `UPDATE users SET deleted_at = NULL, google_id = ?,
              photo_url = COALESCE(photo_url, ?), email_verified = 1,
-             verification_status = 'verified', updated_at = datetime('now') WHERE id = ?`
+             verification_status = 'unverified', updated_at = datetime('now') WHERE id = ?`
           ).bind(googleUser.sub, googleUser.picture || null, user.id).run();
         } else {
           await linkGoogleId(c.env.DB, user.id, googleUser.sub, googleUser.picture);
@@ -636,7 +636,7 @@ auth.get("/google/callback", async (c) => {
     } else if ((user as any).deleted_at) {
       await c.env.DB.prepare(
         `UPDATE users SET deleted_at = NULL, email_verified = 1,
-         verification_status = 'verified', updated_at = datetime('now') WHERE id = ?`
+         verification_status = 'unverified', updated_at = datetime('now') WHERE id = ?`
       ).bind(user.id).run();
       user = await getUserById(c.env.DB, user.id);
     }

@@ -565,39 +565,53 @@ verification.post("/admin/review", authMiddleware, requireAdmin, async (c) => {
     }
 
     const newStatus = approved ? "verified" : "failed";
+    const now = new Date().toISOString();
 
+    // 1. Update session
     await updateVerificationSession(c.env.DB, session_id, {
       status: newStatus,
       manual_reviewer_id: auth.userId,
-      manual_reviewed_at: new Date().toISOString(),
+      manual_reviewed_at: now,
       manual_note: note ?? null,
     });
 
+    // 2. Update user verification_status
     await updateUserVerificationStatus(
       c.env.DB,
       session.user_id,
       approved ? "verified" : "failed",
     );
-    if (c.env.NOTIFICATION_QUEUE) {
-      await c.env.NOTIFICATION_QUEUE.send(
-        approved
-          ? {
-              user_id: session.user_id,
-              type: "verification_approved",
-              title: "Identity Verified ✓",
-              body: "Your identity has been verified. You now have full access to Wihda.",
-              timestamp: new Date().toISOString(),
-            }
-          : {
-              user_id: session.user_id,
-              type: "verification_rejected",
-              title: "Verification Failed",
-              body:
-                note ??
-                "Your verification was not approved. Please contact support for details.",
-              timestamp: new Date().toISOString(),
-            },
-      );
+
+    // 3. Write notification directly to DB so user sees it immediately
+    const notifTitle = approved ? "Identity Verified ✓" : "Verification Failed";
+    const notifBody = approved
+      ? "Your identity has been verified. You now have full access to Wihda."
+      : (note ?? "Your verification was not approved. Please contact support for details.");
+
+    await c.env.DB.prepare(
+      `INSERT INTO notifications (id, user_id, type, title, body, data, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, datetime('now'))`
+    ).bind(
+      crypto.randomUUID(),
+      session.user_id,
+      approved ? "verification_approved" : "verification_rejected",
+      notifTitle,
+      notifBody,
+    ).run();
+
+    // 4. Best-effort: also push via queue for FCM (won't block if queue unavailable)
+    try {
+      if (c.env.NOTIFICATION_QUEUE) {
+        await c.env.NOTIFICATION_QUEUE.send({
+          user_id: session.user_id,
+          type: approved ? "verification_approved" : "verification_rejected",
+          title: notifTitle,
+          body: notifBody,
+          timestamp: now,
+        });
+      }
+    } catch {
+      // Queue unavailable — notification already saved to DB above
     }
 
     return successResponse({ finalized: true, status: newStatus });

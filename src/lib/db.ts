@@ -1370,6 +1370,51 @@ export async function linkGoogleId(
     .run();
 }
 
+// ─── Apple Sign In ────────────────────────────────────────────────────────────
+
+export async function getUserByAppleId(
+  db: D1Database,
+  appleId: string,
+): Promise<User | null> {
+  return db
+    .prepare("SELECT * FROM users WHERE apple_id = ?")
+    .bind(appleId)
+    .first<User>();
+}
+
+export async function createUserWithApple(
+  db: D1Database,
+  data: {
+    email: string;
+    appleId: string;
+    displayName: string;
+    languagePreference?: string;
+  },
+): Promise<User> {
+  const id = generateId();
+  const now = toISODateString();
+  await db
+    .prepare(
+      `INSERT INTO users (id, email, password_hash, display_name, language_preference, apple_id, verification_status, email_verified, created_at, updated_at)
+       VALUES (?, ?, '', ?, ?, ?, 'unverified', 1, ?, ?)`,
+    )
+    .bind(id, data.email, data.displayName, data.languagePreference || "fr", data.appleId, now, now)
+    .run();
+  return getUserById(db, id) as Promise<User>;
+}
+
+export async function linkAppleId(
+  db: D1Database,
+  userId: string,
+  appleId: string,
+): Promise<void> {
+  const now = toISODateString();
+  await db
+    .prepare("UPDATE users SET apple_id = ?, updated_at = ? WHERE id = ?")
+    .bind(appleId, now, userId)
+    .run();
+}
+
 // ─── User verification helpers ────────────────────────────────────────────────
 
 /**

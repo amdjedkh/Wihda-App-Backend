@@ -44,6 +44,12 @@ export interface Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
 
+  // ── Apple Sign In ─────────────────────────────────────────────────────────
+  APPLE_KEY_ID?: string;       // 10-char key ID from Apple Developer portal
+  APPLE_TEAM_ID?: string;      // 10-char team ID
+  APPLE_CLIENT_ID?: string;    // Services ID for web OAuth: com.wihda.web
+  APPLE_PRIVATE_KEY?: string;  // Contents of the .p8 file
+
   FRONTEND_URL?: string; // https://app.wihdaapp.com
   API_URL?: string;      // https://api.wihdaapp.com
 }

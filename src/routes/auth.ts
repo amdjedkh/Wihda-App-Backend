@@ -18,6 +18,9 @@ import {
   getUserByGoogleId,
   createUserWithGoogle,
   linkGoogleId,
+  getUserByAppleId,
+  createUserWithApple,
+  linkAppleId,
 } from "../lib/db";
 import {
   hashPassword,
@@ -712,6 +715,306 @@ auth.get("/google/session", async (c) => {
     access_token: string; refresh_token: string;
   };
   return successResponse({ access_token, refresh_token });
+});
+
+// ─── Apple Sign In helpers ────────────────────────────────────────────────────
+
+/**
+ * Verify an Apple identity_token (RS256 JWT) against Apple's public JWKS.
+ * Returns { sub, email } on success, null on failure.
+ */
+async function verifyAppleIdentityToken(
+  identityToken: string,
+  expectedAudience: string,
+): Promise<{ sub: string; email?: string } | null> {
+  try {
+    const parts = identityToken.split(".");
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
+
+    const decode = (s: string) => atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+    const header = JSON.parse(decode(headerB64)) as { kid: string; alg: string };
+
+    const keysRes = await fetch("https://appleid.apple.com/auth/keys");
+    if (!keysRes.ok) return null;
+    const { keys } = (await keysRes.json()) as { keys: JsonWebKey[] };
+
+    const jwk = keys.find((k: any) => k.kid === header.kid);
+    if (!jwk) return null;
+
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+
+    const sigBytes = Uint8Array.from(decode(sigB64), (c) => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      sigBytes,
+      new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(decode(payloadB64)) as {
+      iss: string; aud: string; exp: number; sub: string; email?: string;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.iss !== "https://appleid.apple.com") return null;
+    if (payload.aud !== expectedAudience) return null;
+    if (payload.exp < now) return null;
+
+    return { sub: payload.sub, email: payload.email };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate a short-lived Apple client secret (ES256 JWT signed with .p8 key).
+ * Required for the web OAuth code exchange.
+ */
+async function generateAppleClientSecret(env: Env, clientId: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const toB64url = (s: string) =>
+    btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+
+  const header  = toB64url(JSON.stringify({ alg: "ES256", kid: env.APPLE_KEY_ID }));
+  const payload = toB64url(JSON.stringify({
+    iss: env.APPLE_TEAM_ID,
+    iat: now,
+    exp: now + 15_777_000, // ~6 months
+    aud: "https://appleid.apple.com",
+    sub: clientId,
+  }));
+  const signingInput = `${header}.${payload}`;
+
+  const pem = env.APPLE_PRIVATE_KEY!
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s/g, "");
+  const keyBytes = Uint8Array.from(atob(pem), (c) => c.charCodeAt(0));
+
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBytes,
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"],
+  );
+  const rawSig = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    key,
+    new TextEncoder().encode(signingInput),
+  );
+  const sigB64url = btoa(String.fromCharCode(...new Uint8Array(rawSig)))
+    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+
+  return `${signingInput}.${sigB64url}`;
+}
+
+/**
+ * Shared logic: given a verified Apple sub + optional email + optional display name,
+ * find or create the local user and return Wihda JWTs.
+ */
+async function findOrCreateAppleUser(
+  c: any,
+  appleId: string,
+  email: string | undefined,
+  displayName: string,
+): Promise<{ user: any; accessToken: string; refreshToken: string } | null> {
+  let user = await getUserByAppleId(c.env.DB, appleId);
+
+  if (!user && email) {
+    // Try to find by email (link apple_id to existing account)
+    user = await getUserByEmail(c.env.DB, email);
+    if (user) {
+      if ((user as any).deleted_at) {
+        await c.env.DB.prepare(
+          `UPDATE users SET deleted_at = NULL, apple_id = ?, email_verified = 1,
+           verification_status = 'unverified', updated_at = datetime('now') WHERE id = ?`
+        ).bind(appleId, user.id).run();
+      } else {
+        await linkAppleId(c.env.DB, user.id, appleId);
+      }
+      user = await getUserById(c.env.DB, user.id);
+    }
+  } else if (user && (user as any).deleted_at) {
+    await c.env.DB.prepare(
+      `UPDATE users SET deleted_at = NULL, email_verified = 1,
+       verification_status = 'unverified', updated_at = datetime('now') WHERE id = ?`
+    ).bind(user.id).run();
+    user = await getUserById(c.env.DB, user.id);
+  }
+
+  if (!user) {
+    if (!email) return null; // Can't create without email
+    user = await createUserWithApple(c.env.DB, {
+      email,
+      appleId,
+      displayName,
+    });
+  }
+
+  if (!user || user.status === "banned" || user.status === "suspended") return null;
+
+  const userNeighborhood = await getUserNeighborhood(c.env.DB, user.id);
+  const tokenPayload = {
+    sub: user.id,
+    role: user.role,
+    neighborhood_id: userNeighborhood?.neighborhood_id ?? null,
+    verification_status: user.verification_status,
+    scope: "full",
+  };
+
+  const accessToken  = await createJWT(tokenPayload, c.env.JWT_SECRET, 24);
+  const refreshToken = await createJWT(tokenPayload, c.env.JWT_SECRET, 168);
+
+  const refreshPayload = await verifyJWT(refreshToken, c.env.JWT_SECRET);
+  if (refreshPayload?.jti) {
+    await c.env.KV.put(refreshTokenKey(refreshPayload.jti), user.id, {
+      expirationTtl: REFRESH_TOKEN_TTL_SECONDS,
+    });
+  }
+
+  return { user, accessToken, refreshToken };
+}
+
+// ─── POST /v1/auth/apple/native ───────────────────────────────────────────────
+
+/**
+ * iOS native Sign in with Apple.
+ * The Capacitor plugin calls Apple's native API, receives an identity_token (JWT),
+ * and posts it here. We verify it and return Wihda tokens.
+ */
+auth.post("/apple/native", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const { identity_token, given_name, family_name } = body as {
+      identity_token?: string;
+      given_name?: string;
+      family_name?: string;
+    };
+
+    if (!identity_token) {
+      return errorResponse("MISSING_TOKEN", "identity_token is required", 400);
+    }
+
+    // Verify against bundle ID (native audience)
+    const appleUser = await verifyAppleIdentityToken(identity_token, "com.wihda.app");
+    if (!appleUser) {
+      return errorResponse("INVALID_TOKEN", "Invalid or expired Apple identity token", 401);
+    }
+
+    const displayName = [given_name, family_name].filter(Boolean).join(" ") || "Wihda User";
+    const result = await findOrCreateAppleUser(c, appleUser.sub, appleUser.email, displayName);
+
+    if (!result) {
+      return errorResponse("ACCOUNT_ERROR", "Unable to sign in with Apple", 403);
+    }
+
+    return successResponse({
+      access_token: result.accessToken,
+      refresh_token: result.refreshToken,
+      expires_in: 86400,
+      user: {
+        id: result.user.id,
+        display_name: result.user.display_name,
+        role: result.user.role,
+        created_at: result.user.created_at,
+        verification_status: result.user.verification_status,
+      },
+    });
+  } catch (err) {
+    console.error("Apple native sign-in error:", err);
+    return errorResponse("INTERNAL_ERROR", "Failed to authenticate with Apple", 500);
+  }
+});
+
+// ─── GET /v1/auth/apple ───────────────────────────────────────────────────────
+
+/**
+ * Starts Apple web OAuth.
+ * Redirects the browser to Apple's authorization page.
+ * Uses the Services ID (com.wihda.web) as client_id.
+ */
+auth.get("/apple", async (c) => {
+  if (!c.env.APPLE_KEY_ID || !c.env.APPLE_TEAM_ID || !c.env.APPLE_PRIVATE_KEY || !c.env.APPLE_CLIENT_ID) {
+    return errorResponse("NOT_CONFIGURED", "Apple Sign In is not configured", 503);
+  }
+
+  const state = crypto.randomUUID();
+  await c.env.KV.put(`apple_oauth_state:${state}`, "1", { expirationTtl: 600 });
+
+  const apiUrl = c.env.API_URL || "https://api.wihdaapp.com";
+  const params = new URLSearchParams({
+    client_id: c.env.APPLE_CLIENT_ID,
+    redirect_uri: `${apiUrl}/v1/auth/apple/callback`,
+    response_type: "code id_token",
+    response_mode: "form_post",
+    scope: "name email",
+    state,
+  });
+
+  return c.redirect(`https://appleid.apple.com/auth/authorize?${params.toString()}`);
+});
+
+// ─── POST /v1/auth/apple/callback ────────────────────────────────────────────
+
+/**
+ * Apple POSTs here after the user authorizes (unlike Google which GETs).
+ * Extracts the id_token, verifies it, and redirects with Wihda tokens.
+ */
+auth.post("/apple/callback", async (c) => {
+  const frontendUrl = c.env.FRONTEND_URL || "https://app.wihdaapp.com";
+
+  try {
+    const body = await c.req.parseBody().catch(() => ({})) as Record<string, string>;
+    const { code, id_token, state, user: userJson, error } = body;
+
+    if (error || !id_token || !state) {
+      return c.redirect(`${frontendUrl}/auth/apple/callback?error=access_denied`);
+    }
+
+    // CSRF check
+    const storedState = await c.env.KV.get(`apple_oauth_state:${state}`);
+    if (!storedState) {
+      return c.redirect(`${frontendUrl}/auth/apple/callback?error=invalid_state`);
+    }
+    await c.env.KV.delete(`apple_oauth_state:${state}`);
+
+    // Verify id_token against the Services ID audience
+    const appleUser = await verifyAppleIdentityToken(id_token, c.env.APPLE_CLIENT_ID!);
+    if (!appleUser) {
+      return c.redirect(`${frontendUrl}/auth/apple/callback?error=invalid_token`);
+    }
+
+    // Apple sends user info (name/email) only on first login as a JSON string
+    let displayName = "Wihda User";
+    if (userJson) {
+      try {
+        const parsed = JSON.parse(userJson) as { name?: { firstName?: string; lastName?: string } };
+        displayName = [parsed.name?.firstName, parsed.name?.lastName].filter(Boolean).join(" ") || displayName;
+      } catch {}
+    }
+
+    const result = await findOrCreateAppleUser(c, appleUser.sub, appleUser.email, displayName);
+    if (!result) {
+      return c.redirect(`${frontendUrl}/auth/apple/callback?error=account_error`);
+    }
+
+    const params = new URLSearchParams({
+      access_token: result.accessToken,
+      refresh_token: result.refreshToken,
+    });
+    return c.redirect(`${frontendUrl}/auth/apple/callback?${params.toString()}`);
+  } catch (err) {
+    console.error("Apple callback error:", err);
+    return c.redirect(`${frontendUrl}/auth/apple/callback?error=internal_error`);
+  }
 });
 
 // ─── Forgot Password helpers ──────────────────────────────────────────────────

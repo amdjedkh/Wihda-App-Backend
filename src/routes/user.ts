@@ -75,6 +75,7 @@ user.get("/", authMiddleware, async (c) => {
     status: currentUser.status,
     verification_status: currentUser.verification_status,
     language_preference: currentUser.language_preference,
+    onboarding_completed: (currentUser as any).onboarding_completed === 1,
     neighborhood: neighborhood
       ? {
           id: neighborhood.id,
@@ -86,6 +87,21 @@ user.get("/", authMiddleware, async (c) => {
     coin_balance: coinBalance,
     created_at: currentUser.created_at,
   });
+});
+
+/**
+ * POST /v1/me/onboarding-complete
+ * Mark the current user's onboarding as completed (web only — mobile uses localStorage).
+ */
+user.post("/onboarding-complete", authMiddleware, async (c) => {
+  const authContext = getAuthContext(c);
+  if (!authContext) return errorResponse("UNAUTHORIZED", "Authentication required", 401);
+
+  await c.env.DB.prepare(
+    "UPDATE users SET onboarding_completed = 1, updated_at = datetime('now') WHERE id = ?"
+  ).bind(authContext.userId).run();
+
+  return successResponse({ onboarding_completed: true });
 });
 
 /**
